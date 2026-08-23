@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Generated output
+figures/
+*.RUN.ipynb
+shift_study_report.html
+shift_study_report.body.html
+N603_two_speed_shift_sweep_results.csv
+
+# the canonical copies of the sample data live in sample_data/
+/N603_AMT_onroadrange_SpeedBased_.csv
+/N603_42UH_230_Fineint_EfficiencyMap.xlsx
+
+# superseded by shift_core.py, and they carry another user's local paths
+City_drive_cycle_data_analysis_no_regen.ipynb
+
+# unrelated CAD
+*.step
+
+# Local scratch
+newview_*.png
+*.tmp
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# local Claude Code working file; the published copy is docs/ENGINEERING_NOTES.md
+CLAUDE.md

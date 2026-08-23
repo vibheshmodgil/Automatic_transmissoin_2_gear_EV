@@ -1,0 +1,9 @@
+# Pinned to the environment this was developed and verified against.
+# numpy is deliberately 1.x: the code uses np.trapz (not np.trapezoid), so it
+# runs unchanged on numpy 1.x and 2.x. Loosen these if you need to.
+customtkinter==5.2.2
+matplotlib>=3.7
+numpy>=1.24,<3
+pandas>=2.0
+scipy>=1.10
+openpyxl>=3.1
