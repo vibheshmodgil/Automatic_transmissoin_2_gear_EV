@@ -1254,11 +1254,8 @@ class ShiftOptimiserApp(ctk.CTk):
         L += self._choice_score(r, p)
         L += ["",
               "  These are the same figures the Single-strategy summary prints; both are",
-              "  built by shift_core.gear_breakdown() so they cannot drift apart.",
-              "",
-              "  Both clouds hug the bottom of the plane. The star is the map's best point;",
-              "  the cycle never gets near it because the demand is a 1-2 kW load and that",
-              "  point is a 5.8 kW operating condition."]
+              "  built by shift_core.gear_breakdown() so they cannot drift apart."]
+        L += self._duty_insight(r, p)
         L += ["", f"  Split shown: {self.disp['ptmode'].get()}."]
         if signed:
             L += ["",
@@ -1314,6 +1311,64 @@ class ShiftOptimiserApp(ctk.CTk):
         if signed:
             groups.append((base & (r.motor_torque < 0), "braking", .5, "none", mk))
         return groups
+
+    def _duty_insight(self, r, p):
+        """What this cycle asks of THIS motor, computed - never asserted.
+
+        The claims that belong here (how hard the motor is worked, how far the duty
+        sits from the map's best point, how much efficiency the ridge is still
+        holding) are all properties of the loaded data. Hard-coding them means the
+        tool keeps printing the old map's numbers after someone loads a new one.
+        """
+        try:
+            em, mot, gb, num = self.emap, p["motor"], p["gb"], p["num"]
+            ratios = np.where(r.gear == 1, gb.ratio_1, gb.ratio_2)
+            etas = np.where(r.gear == 1, gb.eta_1, gb.eta_2)
+            t_w, n_w, p_w = sc.road_load(self.cycle, p["veh"], mot, gb, num, ratios)
+            use = ((p_w > num.power_epsilon) & np.isfinite(r.motor_eff)
+                   & (r.motor_eff < 1.0) & (r.motor_eff > 0))
+            if not use.any():
+                return []
+            w = np.where(use, p_w, 0.0)
+            tq = np.abs(r.motor_torque)
+            rpm = np.abs(r.motor_rpm)
+            shaft = tq * rpm * 2 * np.pi / 60.0
+
+            t_mean = float(np.average(tq[use], weights=w[use]))
+            p_mean = float(np.average(shaft[use], weights=w[use]))
+            pk, pr, pt = em.peak
+            p_peak = pt * pr * 2 * np.pi / 60.0
+
+            # how much efficiency the RIDGE still holds at the torque actually used
+            t_r, n_r = sc.efficiency_ridge(em)
+            i_near = int(np.argmin(np.abs(t_r - t_mean)))
+            ridge_rpm = n_r[i_near]
+            e_here = float(np.average(r.motor_eff[use], weights=w[use]))
+            e_ridge = em.query(np.array([ridge_rpm]), np.array([t_mean]),
+                               np.array([True]))[0][0]
+        except Exception:
+            return []
+
+        L = ["", "  WHAT THIS CYCLE ASKS OF THIS MOTOR", "  " + "-" * 58,
+             f"    energy-weighted mean torque   {t_mean:6.2f} Nm   "
+             f"= {100*t_mean/mot.peak_torque:.0f} % of the {mot.peak_torque:g} Nm rating",
+             f"    energy-weighted mean power    {p_mean/1000:6.2f} kW   "
+             f"= {100*p_mean/mot.peak_power:.0f} % of the {mot.peak_power/1000:g} kW rating",
+             f"    the map's best cell           {pk:6.2%} at {pr:.0f} rpm / {pt:.1f} Nm"
+             f"  = {p_peak/1000:.2f} kW"]
+        if p_mean > 0:
+            L.append(f"    -> the map's best point is a {p_peak/p_mean:.1f}x bigger load "
+                     f"than this duty averages.")
+            L.append("       A ratio slides the operating point ALONG a constant-power")
+            L.append("       curve, so that cell is not reachable from this cycle at any")
+            L.append("       ratio. Judge the schedule against the RIDGE, not the peak.")
+        L += ["",
+              f"    at {t_mean:.1f} Nm the ridge sits at {ridge_rpm:.0f} rpm and reaches "
+              f"{e_ridge:.2%};",
+              f"    this schedule averages {e_here:.2%}, so {100*(e_ridge-e_here):+.2f} "
+              f"points are still on the table",
+              "    at that torque - the gap a better schedule could close."]
+        return L
 
     def _choice_score(self, r, p):
         """How often this schedule engaged the ratio that was actually better.
@@ -1576,15 +1631,41 @@ class ShiftOptimiserApp(ctk.CTk):
                 row.append("gear 1" if (np.isfinite(e1) and (not np.isfinite(e2) or e1 >= e2))
                            else "gear 2")
             txt.append(f"{acc:>8g} | {row[0]:>14}{row[1]:>10}{row[2]:>10}{row[3]:>10}")
+        # the crossover speed for each load, measured off the curves themselves
+        txt += ["", "  WHERE THE TWO RATIOS SWAP PLACES", "  " + "-" * 60,
+                f"  {'acceleration':>13} {'crossover':>11} {'gear 1 torque':>15}"
+                f" {'gear 2 torque':>15}"]
+        cross_pts = []
+        for acc in accels:
+            rec = data[acc]
+            d = rec[1]["eff"] - rec[2]["eff"]
+            with np.errstate(invalid="ignore"):
+                k = np.flatnonzero(np.diff(np.sign(np.nan_to_num(d))) != 0)
+            if len(k):
+                v_c = float(speeds[k[0] + 1])
+                cross_pts.append((acc, v_c))
+                i_c = k[0] + 1
+                txt.append(f"  {acc:>10g} m/s2 {v_c:>8.0f} km/h "
+                           f"{rec[1]['torque'][i_c]:>13.1f} Nm {rec[2]['torque'][i_c]:>13.1f} Nm")
+            else:
+                w = "gear 1" if np.nanmean(d) > 0 else "gear 2"
+                txt.append(f"  {acc:>10g} m/s2 {'none':>8}       {w} wins at every speed")
+        if len(cross_pts) > 1:
+            lo_a, lo_v = cross_pts[0]
+            hi_a, hi_v = cross_pts[-1]
+            txt += ["",
+                    f"  The crossover moves {abs(hi_v-lo_v):.0f} km/h across this load range"
+                    f" ({lo_v:.0f} km/h at {lo_a:g} m/s2 -> {hi_v:.0f} at {hi_a:g}).",
+                    "  A shift threshold is ONE number. Set it for the cruise crossover and",
+                    "  every acceleration is in the wrong ratio; set it for acceleration and",
+                    "  every cruise sample is. That is the cost a speed-only schedule cannot",
+                    "  avoid, and the size of it is the number above."]
         txt += ["",
-                "  At cruise the motor runs at 5-15 % of rated torque, so iron and windage",
-                "  losses (which grow with rpm) beat copper loss (which grows with torque^2)",
-                "  -> the LOW-rpm ratio wins.",
-                "  Under acceleration torque is high, copper loss dominates",
-                "  -> the HIGH-rpm ratio wins.",
-                "",
-                "  A shift schedule based on SPEED ALONE cannot follow that crossover.",
-                "  Real AMT controllers use a 2-D map (speed x torque demand)."]
+                "  Why the ranking inverts: copper loss grows with torque^2 and iron and",
+                "  windage grow with speed. Under load the torque term dominates and the",
+                "  LOW ratio wins by asking for less torque; at cruise the speed term",
+                "  dominates and the HIGH ratio wins by turning slower. The crossover is",
+                "  wherever those two trade places, which is why it moves with load."]
         self.log("\n".join(txt))
         self.say("Gear preference flips with load — see the crossover lines", "warn")
 
@@ -1625,21 +1706,7 @@ class ShiftOptimiserApp(ctk.CTk):
         ax[1].axvline(dn, color=COLORS["success"], lw=2, ls="--")
         ax[1].set_xlabel("Road speed [km/h]"); ax[1].set_ylabel("Acceleration [m/s²]")
         ax[1].set_title("How much the choice is worth", fontweight="bold", fontsize=11)
-        g1 = np.nansum(better == 1); g2 = np.nansum(better == 2)
-        big = np.nansum(delta > 3)
-        self.log(
-            "Optimal gear map\n" + "=" * 74 + "\n"
-            f"  gear 1 better over {100*g1/(g1+g2):.0f} % of the (speed, accel) plane\n"
-            f"  gear 2 better over {100*g2/(g1+g2):.0f} %\n"
-            f"  the choice is worth >3 efficiency points over "
-            f"{100*big/np.isfinite(delta).sum():.0f} % of the plane\n\n"
-            "  The black line is the true optimal-gear boundary. It is a CURVE in the\n"
-            "  (speed, acceleration) plane.\n\n"
-            "  Your shift thresholds are the two vertical lines. A vertical line cannot\n"
-            "  follow a curve: wherever they diverge, the controller is in the wrong gear.\n"
-            "  THIS is the real limit of the study — not the exact upshift number.\n"
-            "  The fix is a 2-D shift map (speed x torque demand), which is what production\n"
-            "  AMT/DCT controllers use.")
+        self.log(self._optimal_summary(sp, ac, better, delta, up, dn))
         self.say("Optimal-gear boundary is a curve; a speed-only threshold is a line", "warn")
 
     # --------------------------------------- wide-open-throttle acceleration
@@ -2181,6 +2248,69 @@ class ShiftOptimiserApp(ctk.CTk):
               "  comparable amounts of energy."]
         return NL.join(L)
 
+    @staticmethod
+    def _optimal_summary(sp, ac, better, delta, up, dn):
+        """Measure the boundary rather than describing it."""
+        NL = chr(10)
+        g1 = int(np.nansum(better == 1)); g2 = int(np.nansum(better == 2))
+        tot = max(g1 + g2, 1)
+        fin = np.isfinite(delta)
+        L = ["Optimal gear map", "=" * 74, "",
+             f"  gear 1 is the better ratio over {100*g1/tot:.0f} % of the "
+             f"(speed, acceleration) plane",
+             f"  gear 2 over {100*g2/tot:.0f} %", ""]
+
+        # where the boundary sits at each load - this is the number that matters
+        L += ["  WHERE THE BOUNDARY SITS, LOAD BY LOAD", "  " + "-" * 58,
+              f"  {'acceleration':>13} {'gear 1 wins up to':>20} {'worth at the edge':>19}"]
+        edges = []
+        for k in range(0, len(ac), max(1, len(ac) // 7)):
+            row = better[k]
+            ok = np.flatnonzero(np.isfinite(row) & (row == 1))
+            if len(ok):
+                v = sp[ok.max()]
+                edges.append(v)
+                L.append(f"  {ac[k]:>10.2f} m/s2 {v:>17.0f} km/h "
+                         f"{np.nanmax(delta[k]):>16.1f} pts")
+            else:
+                L.append(f"  {ac[k]:>10.2f} m/s2 {'never':>17}")
+        if len(edges) > 1:
+            L += ["",
+                  f"  The boundary travels {max(edges)-min(edges):.0f} km/h "
+                  f"({min(edges):.0f} to {max(edges):.0f}) across this load range.",
+                  f"  Your thresholds are vertical lines at {up:g} and {dn:g} km/h. A",
+                  "  vertical line cannot follow a curve that moves that far, so on one",
+                  "  side of the plane or the other the controller is knowingly in the",
+                  "  wrong ratio. That is the structural limit of a speed-only schedule -",
+                  "  not the choice of number."]
+
+        # how much it is worth, so nobody over-reads the boundary
+        if fin.any():
+            L += ["", "  HOW MUCH THE CHOICE IS WORTH", "  " + "-" * 58]
+            for thr in (1, 3, 5, 10):
+                L.append(f"    worth more than {thr:2d} point{'s' if thr > 1 else ' '} "
+                         f"over {100*np.nansum(delta > thr)/fin.sum():5.1f} % of the plane")
+            med = float(np.nanmedian(delta[fin]))
+            share3 = 100 * np.nansum(delta > 3) / fin.sum()
+            L.append(f"    median advantage where a choice exists: {med:.2f} points")
+            # the verdict has to follow the numbers, not a fixed opinion
+            if share3 >= 50:
+                L += [f"    The choice is decisive over most of the plane - {share3:.0f} %",
+                      "    of it is worth more than 3 points. On this map the ratio",
+                      "    selection is not a rounding error; a 2-D shift map on speed and",
+                      "    torque demand would collect what a speed threshold cannot.",
+                      "",
+                      "    Note the tension with the drive-cycle result: the plane is",
+                      "    weighted by AREA, the cycle by where it actually spends energy.",
+                      "    A region can be worth 25 points and still be worth nothing if",
+                      "    the vehicle never goes there. Read this against 'Energy bins'."]
+            else:
+                L += [f"    Most of the plane is nearly indifferent - only {share3:.0f} %",
+                      "    of it is worth more than 3 points. Getting the boundary wrong",
+                      "    costs little except in that minority, which is the only region",
+                      "    worth designing a 2-D shift map for."]
+        return NL.join(L)
+
     def _draw_gradeability(self, df, p, _kind):
         ax = self.fig.subplots()
         ax.plot(df["Speed [km/h]"], df["Gear 1 max grade [deg]"], "o-", lw=2.2,
@@ -2201,15 +2331,41 @@ class ShiftOptimiserApp(ctk.CTk):
         ax.set_title(head, fontweight="bold", fontsize=11.5)
         ax.grid(alpha=.3); ax.legend(fontsize=9)
         adv = df[df["Gear 1 max grade [deg]"] > df["Gear 2 max grade [deg]"] + 1e-9]
-        txt = ["Gradeability", "=" * 74,
-               df.to_string(index=False, float_format=lambda x: f"{x:7.2f}"), ""]
+        g1c, g2c = "Gear 1 max grade [deg]", "Gear 2 max grade [deg]"
+        txt = ["Gradeability - the steepest slope each ratio can hold at a steady speed",
+               "=" * 74, "",
+               df.to_string(index=False, float_format=lambda x: f"{x:7.2f}"), "",
+               "  Steady state, so no inertia term: this is the slope the vehicle can",
+               "  HOLD, not one it can accelerate up.", ""]
+        txt += ["  WHAT THE LOW RATIO BUYS", "  " + "-" * 58]
+        for _, row in df.iterrows():
+            gap = row[g1c] - row[g2c]
+            if gap > 1e-9:
+                txt.append(f"    at {row['Speed [km/h]']:>4.0f} km/h  "
+                           f"{row[g2c]:5.2f}deg -> {row[g1c]:5.2f}deg   "
+                           f"(x{row[g1c]/max(row[g2c],1e-9):.2f}, "
+                           f"{100*np.tan(np.radians(row[g1c])):.0f} % vs "
+                           f"{100*np.tan(np.radians(row[g2c])):.0f} % slope)")
         if len(adv):
-            txt.append(f"Gear 1 provides extra grade only below "
-                       f"{adv['Speed [km/h]'].max():.0f} km/h; above that both ratios are "
-                       f"power-limited and identical.")
-            txt.append("=> set the upshift threshold near that speed: the low gear keeps its "
-                       "climbing duty and the high gear takes the rest.")
-        self.log("\n".join(txt))
+            v_lim = adv["Speed [km/h]"].max()
+            txt += ["",
+                    f"  Above {v_lim:.0f} km/h the two ratios are identical - both are",
+                    "  power-limited there, and a ratio cannot create power. The low gear",
+                    "  therefore has exactly one job: climbing below that speed.",
+                    "",
+                    f"  => an upshift near {v_lim:.0f} km/h keeps the low ratio through its",
+                    "     whole useful range and hands over the moment it stops helping."]
+        else:
+            txt += ["", "  The two ratios give the same grade at every speed tested -",
+                    "  the low ratio adds no climbing ability on this vehicle."]
+        best = df[g1c].max()
+        txt += ["",
+                f"  Steepest slope the vehicle can hold at all: {best:.2f} deg "
+                f"({100*np.tan(np.radians(best)):.0f} % gradient), in gear 1 at "
+                f"{df.loc[df[g1c].idxmax(), 'Speed [km/h]']:.0f} km/h.",
+                "  Check that against the steepest ramp the vehicle has to serve - that",
+                "  is the requirement the low ratio exists to meet."]
+        self.log(chr(10).join(txt))
         self.say("Gradeability computed", "ok")
 
     def _draw_efficiency(self, _out, p, _kind):
@@ -2235,16 +2391,72 @@ class ShiftOptimiserApp(ctk.CTk):
         ax.set_title(f"Motor efficiency map  ·  peak {pk:.2%} at {pr:.0f} rpm / "
                      f"{pt:.1f} Nm  =  {pw/1000:.2f} kW of shaft power",
                      fontweight="bold", fontsize=11.5)
-        self.log(f"Efficiency map\n{'='*74}\n"
-                 f"  grid            : {em.eff.shape[0]} torque x {em.eff.shape[1]} speed\n"
-                 f"  blank cells     : {em.missing.sum():,} of {em.eff.size:,} "
-                 f"({100*em.missing.sum()/em.eff.size:.1f} %)\n"
-                 f"  peak efficiency : {pk:.2%} at {pr:.0f} rpm / {pt:.1f} Nm\n"
-                 f"  that point is   : {pw/1000:.2f} kW of shaft power\n\n"
-                 f"  A gear ratio moves the operating point ALONG an iso-power curve.\n"
-                 f"  If the cycle's mean power is far below {pw/1000:.2f} kW, no shift\n"
-                 f"  schedule can reach this island — the motor is oversized for the duty.")
+        self.log(self._map_summary(em, p, pk, pr, pt, pw))
         self.say(f"Peak {pk:.2%} at {pr:.0f} rpm / {pt:.1f} Nm", "ok")
+
+    def _map_summary(self, em, p, pk, pr, pt, pw):
+        """Describe THIS map: its shape, its ridge, and how peaky it really is."""
+        NL = chr(10)
+        eff = np.where(em.missing, np.nan, em.eff)
+        finite = np.isfinite(eff)
+        L = [f"Efficiency map", "=" * 74, "",
+             f"  grid              {em.eff.shape[0]} torque rows x {em.eff.shape[1]} "
+             f"speed columns",
+             f"  torque axis       {em.torque.min():.1f} to {em.torque.max():.1f} Nm",
+             f"  speed axis        {em.rpm.min():.0f} to {em.rpm.max():.0f} rpm",
+             f"  blank cells       {em.missing.sum():,} of {em.eff.size:,} "
+             f"({100*em.missing.sum()/em.eff.size:.1f} %)",
+             f"  peak              {pk:.2%} at {pr:.0f} rpm / {pt:.1f} Nm "
+             f"= {pw/1000:.2f} kW of shaft power", ""]
+
+        # how peaky: what fraction of the measured plane is within N points of peak
+        L += ["  HOW PEAKY IS IT?", "  " + "-" * 58]
+        for band in (0.5, 1.0, 2.0, 5.0):
+            frac = np.nansum(finite & (eff >= pk - band / 100)) / max(finite.sum(), 1)
+            L.append(f"    within {band:3.1f} points of peak : {100*frac:5.1f} % of the "
+                     f"measured cells")
+        L += ["    A flat map means the ratio choice cannot matter much; a peaky one",
+              "    means it can. This is the single best predictor of whether a shift",
+              "    study on this motor is worth running."]
+
+        # the ridge - where the best speed sits for each load
+        try:
+            t_r, n_r = sc.efficiency_ridge(em)
+            L += ["", "  THE RIDGE - best speed at each torque", "  " + "-" * 58,
+                  f"    {'torque':>9} {'best rpm':>10} {'efficiency':>12}"]
+            for want in (2, 5, 10, 20, 30):
+                i = int(np.argmin(np.abs(t_r - want)))
+                e = em.query(np.array([n_r[i]]), np.array([t_r[i]]),
+                             np.array([True]))[0][0]
+                L.append(f"    {t_r[i]:8.1f} Nm {n_r[i]:9.0f} {e:11.2%}")
+            L += ["    The best SPEED is not a property of the motor - it moves with",
+                  "    load. A duty that never reaches the peak's torque should be judged",
+                  "    against this curve, not against the peak."]
+        except Exception:
+            pass
+
+        # what the envelope actually allows
+        try:
+            R, T = np.meshgrid(em.rpm, em.torque)
+            under = T <= p["motor"].envelope(R)
+            usable = finite & under
+            share = 100 * np.sum(usable) / max(np.sum(finite), 1)
+            L += ["", "  REACHABLE REGION", "  " + "-" * 58,
+                  f"    {share:.1f} % of the measured cells sit under the "
+                  f"{p['motor'].peak_torque:g} Nm / "
+                  f"{p['motor'].peak_power/1000:g} kW envelope"]
+            if share < 99.5:
+                L.append("    the rest is mapped but the motor cannot hold it "
+                         "continuously")
+            else:
+                L.append("    the whole measured map is deliverable - the envelope is not "
+                         "the")
+                L.append("    binding constraint on this motor over the mapped region")
+            L.append(f"    best reachable point: "
+                     f"{np.nanmax(np.where(usable, eff, np.nan)):.2%}")
+        except Exception:
+            pass
+        return NL.join(L)
 
     # -------------------------------------------------------------- summaries
     def _summary(self, r):

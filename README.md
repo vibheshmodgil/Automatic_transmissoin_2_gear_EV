@@ -174,6 +174,29 @@ traces stacked up. `Auto` returns it to fitting the panel exactly.
 
 ---
 
+### The text panel
+
+Every analysis writes an exhaustive summary underneath the plot, and **every claim in it
+is computed from the loaded data**. Nothing is asserted. That matters more than it
+sounds: an earlier version told you the duty was "a 1-2 kW load against a 5.8 kW peak"
+regardless of which map you had loaded, which is a false statement waiting to happen the
+moment someone opens a different motor.
+
+The summaries answer, per analysis: how hard this cycle works this motor (mean torque and
+power as a share of rating, and how many times larger the map's best point is); how peaky
+the map is (share of cells within 0.5, 1, 2 and 5 points of peak — the best single
+predictor of whether a shift study on that motor is worth running); where the efficiency
+ridge sits at each torque; where the two ratios swap places at each load and how far that
+crossover travels; what share of energy went through the better ratio; which (rpm, Nm)
+cells carry and waste the energy; and what an optimum actually won on, split into wheel,
+gearbox, motor, auxiliary and pack terms.
+
+Where a verdict is offered it follows the numbers — the optimal-gear summary says "the
+choice is decisive over most of the plane" or "most of the plane is nearly indifferent"
+depending on what the map actually shows, and flags the tension between an area-weighted
+plane and an energy-weighted cycle rather than letting the two results quietly contradict
+each other.
+
 ## What the model includes
 
 - **Road load** — inertia, rolling, aerodynamic, grade. Acceleration from
