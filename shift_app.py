@@ -15,6 +15,7 @@ Run:  python shift_app.py
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import traceback
@@ -242,10 +243,20 @@ class ShiftOptimiserApp(ctk.CTk):
                              border_width=1, border_color=COLORS["border"])
         right.pack(side="left", fill="both", expand=True)
 
-        # the plot lives in a scrollable host so a tall stack of signal panels
-        # can be scrolled instead of being squeezed flat
-        self.plot_host = ctk.CTkScrollableFrame(right, fg_color=COLORS["plot_bg"],
-                                                corner_radius=0)
+        # The plot normally lives in a scrollable host so a tall stack of signal
+        # panels can be scrolled rather than squeezed flat. On some machines -
+        # high-DPI displays, other CustomTkinter builds - a Tk canvas with an
+        # explicit pixel height inside CTkScrollableFrame ends up with no visible
+        # height, and the figure draws into a widget nobody can see. The simple
+        # layout packs the canvas straight into the panel, which always lays out;
+        # the cost is that a very tall figure is scaled to fit instead of scrolling.
+        self.simple_layout = os.environ.get("SHIFT_APP_SIMPLE_LAYOUT", "") == "1"
+        if self.simple_layout:
+            self.plot_host = ctk.CTkFrame(right, fg_color=COLORS["plot_bg"],
+                                          corner_radius=0)
+        else:
+            self.plot_host = ctk.CTkScrollableFrame(right, fg_color=COLORS["plot_bg"],
+                                                    corner_radius=0)
         self.plot_host.pack(fill="both", expand=True, padx=10, pady=(10, 0))
 
         self.fig = plt.Figure(figsize=(11, 6.2), dpi=100, facecolor=COLORS["plot_bg"])
@@ -634,19 +645,71 @@ class ShiftOptimiserApp(ctk.CTk):
         self._last_render = (kind, out, p)
         self.fig.clear()
         getattr(self, "_draw_" + kind.split()[0].lower())(out, p, kind)
-        # layout engine rather than a one-shot tight_layout: the figure is resized
-        # by the scrollable host after this call and must re-fit itself
-        self.fig.set_layout_engine("tight")
+        # Layout engine rather than a one-shot tight_layout: the figure is resized
+        # by the host after this call and must re-fit itself. set_layout_engine
+        # needs matplotlib >= 3.6; fall back so older installs still draw.
+        try:
+            self.fig.set_layout_engine("tight")
+        except Exception:
+            try:
+                self.fig.tight_layout()
+            except Exception:
+                pass
         self._fit_canvas(kind)
         self.canvas.draw()
 
     def _fit_canvas(self, kind):
-        """Canvas height: the user's if they set one, otherwise fitted to the view."""
+        """Canvas height: the user's if they set one, otherwise fitted to the view.
+
+        In the simple layout the canvas fills its panel, so forcing a height would
+        only fight the geometry manager - leave it alone there.
+        """
+        if self.simple_layout:
+            return
         if self._manual_h:
             self.canvas.get_tk_widget().configure(height=self._manual_h)
+            self._warn_if_invisible()
             return
-        n = len(self.fig.axes) if kind == "Single strategy" else 0
-        self.canvas.get_tk_widget().configure(height=max(560, 155 * n))
+
+        # Fit the viewport unless the content genuinely needs more room. Forcing a
+        # fixed height taller than the visible area pushes the figure below the fold
+        # and the panel reads as blank - which is exactly what happens on a smaller
+        # screen or at higher display scaling.
+        want = 155 * len(self.fig.axes) if kind == "Single strategy" else 0
+        self.canvas.get_tk_widget().configure(height=max(want, self._viewport_h()))
+        self._warn_if_invisible()
+
+    def _viewport_h(self) -> int:
+        """Visible height of the scroll area, in pixels, with a sane fallback."""
+        try:
+            self.update_idletasks()
+            for widget in (getattr(self.plot_host, "_parent_canvas", None),
+                           self.plot_host):
+                if widget is not None:
+                    h = widget.winfo_height()
+                    if h > 1:
+                        return int(h)
+        except Exception:
+            pass
+        return 420
+
+    def _warn_if_invisible(self):
+        """Say something useful if the plot widget has no height on this machine.
+
+        A silent blank panel is the worst failure mode: every number is right, the
+        figure is drawn, and there is nothing on screen to explain it.
+        """
+        if self.simple_layout or getattr(self, "_layout_warned", False):
+            return
+        try:
+            self.update_idletasks()
+            w = self.canvas.get_tk_widget()
+            if w.winfo_ismapped() and w.winfo_height() <= 1:
+                self._layout_warned = True
+                self.say("Plot area has no height on this display - restart with "
+                         "SHIFT_APP_SIMPLE_LAYOUT=1 (see README)", "err")
+        except Exception:
+            pass
 
     def _set_plot_height(self, px):
         self._manual_h = int(round(float(px)))

@@ -215,6 +215,63 @@ ridge sits. Load it and re-run.
 
 ---
 
+## Troubleshooting
+
+### "This figure includes Axes that are not compatible with tight_layout"
+
+**Harmless — ignore it.** It comes from colour bars attached to several axes at once,
+it appears on a fully working install, and the figure still draws correctly. It fires
+at `canvas.draw()`, which is the *last* line of the render, so seeing it means the
+figure was built successfully. It is never the reason a plot is missing.
+
+### The numbers appear but the plot area is blank
+
+The figure is being drawn into a widget that has no visible height on your display —
+usually a smaller screen or higher display scaling than the machine it was built on.
+
+Run the diagnostic and read the last few lines:
+
+```bash
+python diagnose_ui.py
+```
+
+It prints library versions, display scaling, and the real on-screen geometry of the plot
+widgets after an actual render, then tells you which case you are in. It needs no data
+files.
+
+Two things to try:
+
+1. **Press `Auto`** next to the *Plot height* slider. If a tall height was set manually
+   (or carried over from a taller analysis), the figure can sit below the fold inside
+   the scroll area.
+2. **Force the simple layout**, which packs the canvas straight into the panel instead
+   of into a scroll container:
+
+   ```bat
+   set SHIFT_APP_SIMPLE_LAYOUT=1
+   python shift_app.py
+   ```
+
+   ```bash
+   SHIFT_APP_SIMPLE_LAYOUT=1 python shift_app.py     # macOS / Linux
+   ```
+
+   The only thing you give up is scrolling a very tall stack of signal panels — the
+   figure is scaled to fit the panel instead.
+
+If neither helps, send the full output of `diagnose_ui.py`.
+
+### Other things worth checking
+
+- **`No module named customtkinter`** (or matplotlib, scipy, …) —
+  `python -m pip install -r requirements.txt`.
+- **matplotlib older than 3.6** — the app falls back to a one-shot `tight_layout()`
+  automatically, but `requirements.txt` asks for 3.7+ and the layout is better there.
+- **Nothing happens when you press Run** — check the panel underneath the plot. Errors
+  are printed there in full, and the status bar at the bottom says what went wrong.
+
+---
+
 ## Requirements
 
 Python 3.10+. Pinned in `requirements.txt` to match the environment this was developed
