@@ -122,10 +122,27 @@ pulling 25 Nm; this is the energy budget instead of a population count. Four pan
 energy drawn per cell, where it is *wasted*, the **transition** between two schedules
 (which cells lost energy, which gained), and the efficiency achieved per cell.
 
-The transition summary is the direct answer to "did this schedule move the operating
-points somewhere better?" — on the sample data, going 22/10 → 32/22 moves 5.36 kWh
-(61.8 % of the total) **out of cells averaging 92.73 % into cells averaging 89.20 %**, and
-motor loss rises 643 → 857 Wh.
+It runs **before and after, side by side on one colour scale**: the reference is a single
+ratio (always gear 1 by default — what the gearbox has to beat), then your schedule, then
+the difference, then the same story in one dimension as energy per efficiency band.
+
+On the sample data, going from **always gear 1** to **shifting 22/10**:
+
+| | before | after | change |
+|---|---|---|---|
+| energy drawn | 9.0624 kWh | 8.6800 kWh | −382 Wh |
+| **motor loss** | **995.4 Wh** | **643.3 Wh** | **−352 Wh** |
+| mean efficiency | 89.02 % | 92.59 % | **+3.57 pts** |
+
+**6.57 kWh leaves cells averaging 87.77 % and 6.18 kWh arrives in cells averaging
+92.74 % — 72.5 % of the energy, relocated 4.97 points better.** The biggest loser is
+3000–3500 rpm / 0–5 Nm (−795 Wh, was 88.6 %); the biggest gainer is 1500–2000 rpm /
+5–10 Nm (+993 Wh, now 93.7 %). The efficiency-band histogram shows it plainly: before,
+the energy is smeared from 80 % to 95 %; after, it collapses into one spike at 92.5 %.
+
+Set the reference to *always gear 2* or *custom thresholds* to ask a different question —
+against gear 2 alone the schedule is worth only 21 Wh, which is the honest measure of what
+*tuning* the thresholds buys once you already have the high ratio.
 
 ▸ **Efficiency map** — the map itself with the motor envelope and peak marked.
 

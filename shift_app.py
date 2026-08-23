@@ -115,6 +115,7 @@ FIELDS = [
     ("Sweep range", "Step [km/h]", "step", "1", "sw"),
     ("Sweep range", "Minimum band [km/h]", "min_band", "2", "sw"),
     ("Energy bins", "Bin size [rpm]", "bin_rpm", "500", "bin"),
+    ("Energy bins", "Reference (0=g1, 1=g2, 2=custom)", "ref_mode", "0", "bin"),
     ("Energy bins", "Bin size [Nm]", "bin_nm", "5", "bin"),
     ("Energy bins", "Compare upshift [km/h]", "cmp_up", "32", "bin"),
     ("Energy bins", "Compare downshift [km/h]", "cmp_dn", "22", "bin"),
@@ -144,6 +145,9 @@ ISO_POWER_KW = [0.25, 0.5, 1, 2, 3, 5, 8, 11]
 CMAPS = ["viridis", "plasma", "magma", "cividis", "turbo", "coolwarm", "Greys"]
 # how to split the operating cloud in "Points on map" - each answers a different
 # question about the same points
+BIN_REFERENCE = ["always gear 1 (no shifting)",
+                 "always gear 2 (no shifting)",
+                 "custom thresholds below"]
 POINT_MODES = ["motoring / braking",
                "right or wrong ratio",
                "accelerating / cruising / braking",
@@ -696,6 +700,7 @@ class ShiftOptimiserApp(ctk.CTk):
             dn_lo=self._f("sw", "dn_lo", 4), dn_hi=self._f("sw", "dn_hi", 30),
             step=self._f("sw", "step", 1), min_band=self._f("sw", "min_band", 2),
             bin_rpm=self._f("bin", "bin_rpm", 500), bin_nm=self._f("bin", "bin_nm", 5),
+            ref_mode=int(self._f("bin", "ref_mode", 0)),
             cmp_up=self._f("bin", "cmp_up", 32), cmp_dn=self._f("bin", "cmp_dn", 22),
             v_target=self._f("run", "v_target", 30),
             throttle=self._f("run", "throttle", 1.0),
@@ -737,17 +742,38 @@ class ShiftOptimiserApp(ctk.CTk):
                 kw = dict(veh=p["veh"], motor=p["motor"], gb=p["gb"], num=p["num"],
                           rpm_step=max(50.0, I["bin_rpm"]),
                           torque_step=max(0.5, I["bin_nm"]))
+                # REFERENCE first, then the schedule from the Thresholds inputs.
+                # The natural baseline is a single ratio - it is what the gearbox has
+                # to beat - so "always gear 1" is the default rather than some other
+                # arbitrary threshold pair.
+                v_top = float(self.cycle.speed_kmh.max())
+                mode = int(I.get("ref_mode", 0))
+                if mode == 1:
+                    ref_u, ref_d, ref_lab = 0.5, 0.2, "always gear 2"
+                elif mode == 2:
+                    ref_u, ref_d, ref_lab = I["cmp_up"], I["cmp_dn"], "custom"
+                else:
+                    ref_u, ref_d, ref_lab = v_top + 10, v_top + 5, "always gear 1"
+                # the reference is a baseline, not a candidate: it is not required to
+                # satisfy the driveability gates a real schedule must
+                open_cost = sc.ShiftCost(p["cost"].energy_per_shift,
+                                         p["cost"].interrupt_s, np.inf,
+                                         min_band_kmh=0.0, min_accel_reserve=0.0,
+                                         max_accel_loss=1.0)
                 runs, bins = {}, {}
-                for tag, u, d in (("A", I["upshift"], I["downshift"]),
-                                  ("B", I["cmp_up"], I["cmp_dn"])):
-                    runs[tag] = sc.simulate(self.cycle, self.emap, u, d,
-                                            keep_arrays=True, **p)
-                ok_runs = [x for x in runs.values() if x.gear is not None]
+                runs["R"] = sc.simulate(self.cycle, self.emap, ref_u, ref_d,
+                                        keep_arrays=True, **{**p, "cost": open_cost})
+                runs["A"] = sc.simulate(self.cycle, self.emap, I["upshift"],
+                                        I["downshift"], keep_arrays=True, **p)
+                runs["_label"] = ref_lab
+                ok_runs = [x for x in runs.values()
+                           if hasattr(x, "gear") and x.gear is not None]
                 kw["rpm_max"] = max((float(np.nanmax(np.abs(x.motor_rpm)))
                                      for x in ok_runs), default=0.0)
                 kw["torque_max"] = max((float(np.nanmax(np.abs(x.motor_torque)))
                                         for x in ok_runs), default=0.0)
-                for tag, rr in runs.items():
+                for tag in ("R", "A"):
+                    rr = runs[tag]
                     bins[tag] = sc.energy_bins(rr, self.cycle, **kw) \
                         if rr.gear is not None else None
                 out = (runs, bins)
@@ -1859,160 +1885,182 @@ class ShiftOptimiserApp(ctk.CTk):
 
     # ------------------------------------------------- energy bins
     def _draw_bins(self, payload, p, _kind):
-        """Where the cycle's energy goes, and where a schedule moves it.
+        """Side by side: a single ratio, then the shift schedule, then the difference.
 
-        A scatter of operating points weights a sample idling at 2 Nm the same as one
-        pulling 25 Nm. Binning the plane and accumulating ENERGY fixes that, and the
-        difference between two schedules' grids answers the question directly: which
-        cells did this schedule take energy out of, and which did it put it into?
+        The reference is what the gearbox has to beat. Putting the two bin grids next
+        to each other on one colour scale shows the energy physically moving between
+        cells, and the fourth panel collapses that to one dimension - how much energy
+        sits in each efficiency band before and after.
         """
         runs, bins = payload
-        if bins["A"] is None:
-            self.fig.text(.5, .5, "Strategy A is infeasible\n\n"
-                          + "\n".join(runs["A"].reasons), ha="center", va="center",
+        ref_lab = runs.get("_label", "reference")
+        R, A = bins["R"], bins["A"]
+        rR, rA = runs["R"], runs["A"]
+        if A is None:
+            self.fig.text(.5, .5, "The schedule is infeasible\n\n"
+                          + "\n".join(rA.reasons), ha="center", va="center",
                           color=COLORS["danger"])
-            self.log("A infeasible: " + "; ".join(runs["A"].reasons)); return
+            self.log("Infeasible: " + "; ".join(rA.reasons)); return
 
-        A, B = bins["A"], bins["B"]
-        rA, rB = runs["A"], runs["B"]
         gs = self.fig.add_gridspec(2, 2, hspace=.32, wspace=.24)
-        axes = [self.fig.add_subplot(gs[i, j]) for i in (0, 1) for j in (0, 1)]
+        ax = [self.fig.add_subplot(gs[i, j]) for i in (0, 1) for j in (0, 1)]
         X, Y = A["rpm_edges"], A["torque_edges"]
+        st = self._map_style()
 
-        def frame(ax):
-            """Efficiency contours behind the bins, so a cell can be read in context."""
+        def frame(a):
             em = self.emap
-            st = self._map_style()
-            R, T = np.meshgrid(em.rpm, em.torque)
+            Rm, Tm = np.meshgrid(em.rpm, em.torque)
             Z = np.where(em.missing, np.nan, em.eff) * 100
-            if st["fill"] > 0:
-                ax.contourf(R, T, Z, levels=np.linspace(st["lo"], st["hi"], st["fill"] + 1),
-                            cmap="Greys_r", alpha=.30, extend="both", zorder=0)
+            a.contourf(Rm, Tm, Z, levels=np.linspace(st["lo"], st["hi"], 24),
+                       cmap="Greys_r", alpha=.28, extend="both", zorder=0)
             n = np.linspace(1, p["motor"].max_rpm, 400)
-            ax.plot(n, p["motor"].envelope(n), color=COLORS["danger"], lw=1.8, zorder=6)
+            a.plot(n, p["motor"].envelope(n), color=COLORS["danger"], lw=1.6, zorder=6)
             try:
                 t_r, n_r = sc.efficiency_ridge(em)
-                ax.plot(n_r, t_r, color="#d81b60", lw=2, zorder=6)
+                a.plot(n_r, t_r, color="#d81b60", lw=2, zorder=6)
             except Exception:
                 pass
-            ax.set_xlim(0, X[-1]); ax.set_ylim(0, Y[-1])
-            ax.set_xlabel("Motor speed [rpm]"); ax.set_ylabel("Motor torque [Nm]")
+            a.set_xlim(0, X[-1]); a.set_ylim(0, Y[-1])
+            a.set_xlabel("Motor speed [rpm]"); a.set_ylabel("Motor torque [Nm]")
 
-        # --- 1. energy drawn, schedule A -------------------------------------
-        frame(axes[0])
-        m0 = axes[0].pcolormesh(X, Y, np.where(A["e_in"] > 0, A["e_in"], np.nan),
-                                cmap="viridis", shading="flat", zorder=2)
-        self._colorbar(m0, axes[0], "Energy drawn [kWh]")
-        axes[0].set_title(f"A: energy drawn per bin   {rA.upshift:g}/{rA.downshift:g}"
-                          f"   ({A['total_in']:.3f} kWh)",
-                          fontweight="bold", fontsize=10)
+        # one colour scale for both grids, or they cannot be compared by eye
+        top = max(np.nanmax(A["e_in"]), np.nanmax(R["e_in"]) if R is not None else 0)
 
-        # --- 2. loss, schedule A ---------------------------------------------
-        frame(axes[1])
-        m1 = axes[1].pcolormesh(X, Y, np.where(A["loss"] > 0, A["loss"] * 1000, np.nan),
-                                cmap="inferno", shading="flat", zorder=2)
-        self._colorbar(m1, axes[1], "Motor loss [Wh]")
-        axes[1].set_title(f"A: where the energy is WASTED   "
-                          f"({1000*A['loss'].sum():.0f} Wh total)",
-                          fontweight="bold", fontsize=10)
-
-        # --- 3. the transition -----------------------------------------------
-        frame(axes[2])
-        if B is not None:
-            d = B["e_in"] - A["e_in"]
-            lim = float(np.nanmax(np.abs(d))) or 1.0
-            m2 = axes[2].pcolormesh(X, Y, np.where(np.abs(d) > 1e-9, d * 1000, np.nan),
-                                    cmap="RdBu_r", shading="flat", vmin=-1000 * lim,
-                                    vmax=1000 * lim, zorder=2)
-            self._colorbar(m2, axes[2], "Energy moved [Wh]   red = into B")
-            axes[2].set_title(f"Transition   {rA.upshift:g}/{rA.downshift:g} "
-                              f"-> {rB.upshift:g}/{rB.downshift:g}",
-                              fontweight="bold", fontsize=10)
+        frame(ax[0])
+        if R is not None:
+            m = ax[0].pcolormesh(X, Y, np.where(R["e_in"] > 0, R["e_in"], np.nan),
+                                 cmap="viridis", shading="flat", vmin=0, vmax=top,
+                                 zorder=2)
+            self._colorbar(m, ax[0], "Energy drawn [kWh]")
+            ax[0].set_title(f"BEFORE - {ref_lab}   ({R['total_in']:.3f} kWh, "
+                            f"{1000*R['loss'].sum():.0f} Wh lost)",
+                            fontweight="bold", fontsize=10)
         else:
-            axes[2].set_title("Comparison schedule infeasible", fontweight="bold",
-                              fontsize=10)
+            ax[0].set_title("reference infeasible", fontweight="bold", fontsize=10)
 
-        # --- 4. efficiency of each bin ---------------------------------------
-        frame(axes[3])
-        m3 = axes[3].pcolormesh(X, Y, A["eff"] * 100, cmap="viridis", shading="flat",
-                                zorder=2, vmin=self._map_style()["lo"],
-                                vmax=self._map_style()["hi"])
-        self._colorbar(m3, axes[3], "Bin efficiency [%]")
-        axes[3].set_title("A: efficiency achieved in each bin", fontweight="bold",
-                          fontsize=10)
+        frame(ax[1])
+        m = ax[1].pcolormesh(X, Y, np.where(A["e_in"] > 0, A["e_in"], np.nan),
+                             cmap="viridis", shading="flat", vmin=0, vmax=top, zorder=2)
+        self._colorbar(m, ax[1], "Energy drawn [kWh]")
+        ax[1].set_title(f"AFTER - shifting {rA.upshift:g}/{rA.downshift:g}   "
+                        f"({A['total_in']:.3f} kWh, {1000*A['loss'].sum():.0f} Wh lost)",
+                        fontweight="bold", fontsize=10)
 
-        self.fig.suptitle(f"Energy accounted into "
-                          f"{A['rpm_edges'][1]-A['rpm_edges'][0]:.0f} rpm x "
-                          f"{A['torque_edges'][1]-A['torque_edges'][0]:.0f} Nm bins",
+        # --- 3. what moved ---------------------------------------------------
+        frame(ax[2])
+        if R is not None:
+            d = A["e_in"] - R["e_in"]
+            lim = float(np.nanmax(np.abs(d))) or 1.0
+            m = ax[2].pcolormesh(X, Y, np.where(np.abs(d) > 1e-9, d * 1000, np.nan),
+                                 cmap="RdBu_r", shading="flat", vmin=-1000 * lim,
+                                 vmax=1000 * lim, zorder=2)
+            self._colorbar(m, ax[2], "Energy moved [Wh]")
+            ax[2].set_title("WHAT MOVED   red = gained, blue = lost",
+                            fontweight="bold", fontsize=10)
+
+        # --- 4. the same thing in one dimension -------------------------------
+        ax[3].set_facecolor(COLORS["plot_bg"])
+        edges = np.arange(np.floor(st["lo"] / 2) * 2, 96.1, 2.0)
+        def spectrum(b):
+            e = np.zeros(len(edges) - 1)
+            eff = b["eff"] * 100
+            for k in range(len(edges) - 1):
+                m2 = np.isfinite(eff) & (eff >= edges[k]) & (eff < edges[k + 1])
+                e[k] = b["e_in"][m2].sum()
+            return e
+        centres = (edges[:-1] + edges[1:]) / 2
+        wbar = 0.8
+        if R is not None:
+            ax[3].bar(centres - wbar / 2, spectrum(R), width=wbar,
+                      color=COLORS["text_muted"], alpha=.85, label=f"before ({ref_lab})")
+        ax[3].bar(centres + wbar / 2, spectrum(A), width=wbar,
+                  color=COLORS["primary"], alpha=.9,
+                  label=f"after ({rA.upshift:g}/{rA.downshift:g})")
+        ax[3].set_xlabel("Efficiency of the cell [%]")
+        ax[3].set_ylabel("Energy drawn there [kWh]")
+        ax[3].set_title("Energy by efficiency band - the shift, in one dimension",
+                        fontweight="bold", fontsize=10)
+        ax[3].grid(alpha=.3, axis="y")
+        ax[3].legend(fontsize=8)
+
+        self.fig.suptitle(f"Where the energy goes, and what the shift schedule moves"
+                          f"   ({X[1]-X[0]:.0f} rpm x {Y[1]-Y[0]:.0f} Nm bins)",
                           fontweight="bold")
-        self.log(self._bins_summary(A, B, rA, rB))
-        self.say(f"{A['total_in']:.3f} kWh binned; "
-                 f"{1000*A['loss'].sum():.0f} Wh lost in the motor", "ok")
+        self.log(self._bins_summary(R, A, rR, rA, ref_lab))
+        if R is not None:
+            self.say(f"{ref_lab}: {1000*R['loss'].sum():.0f} Wh lost  ->  shifting: "
+                     f"{1000*A['loss'].sum():.0f} Wh", "ok")
 
     @staticmethod
-    def _bins_summary(A, B, rA, rB):
+    def _bins_summary(R, A, rR, rA, ref_lab):
         NL = chr(10)
         X, Y = A["rpm_edges"], A["torque_edges"]
 
         def cell(i, j):
-            return (f"{X[j]:.0f}-{X[j+1]:.0f} rpm, {Y[i]:.0f}-{Y[i+1]:.0f} Nm")
+            return f"{X[j]:.0f}-{X[j+1]:.0f} rpm, {Y[i]:.0f}-{Y[i+1]:.0f} Nm"
 
-        L = [f"Energy bins - schedule A = {rA.upshift:g}/{rA.downshift:g} km/h",
-             "=" * 74, "",
-             f"  {A['total_in']:.4f} kWh drawn, {A['total_out']:.4f} kWh delivered,",
-             f"  {1000*A['loss'].sum():.1f} Wh lost in the motor "
-             f"({100*A['loss'].sum()/A['total_in']:.2f} % of what was drawn)", ""]
+        L = [f"Energy bins   BEFORE = {ref_lab}   AFTER = shifting "
+             f"{rA.upshift:g}/{rA.downshift:g} km/h", "=" * 74, ""]
+        if R is not None:
+            L += [f"  {'':22}{'BEFORE':>12}{'AFTER':>12}{'change':>12}",
+                  f"  {'energy drawn':22}{R['total_in']:11.4f}{A['total_in']:12.4f}"
+                  f"{1000*(A['total_in']-R['total_in']):+11.1f} Wh",
+                  f"  {'delivered at shaft':22}{R['total_out']:11.4f}"
+                  f"{A['total_out']:12.4f}"
+                  f"{1000*(A['total_out']-R['total_out']):+11.1f} Wh",
+                  f"  {'MOTOR LOSS':22}{1000*R['loss'].sum():10.1f} Wh"
+                  f"{1000*A['loss'].sum():10.1f} Wh"
+                  f"{1000*(A['loss'].sum()-R['loss'].sum()):+11.1f} Wh",
+                  f"  {'mean efficiency':22}"
+                  f"{R['total_out']/R['total_in']:11.2%}"
+                  f"{A['total_out']/A['total_in']:12.2%}"
+                  f"{100*(A['total_out']/A['total_in']-R['total_out']/R['total_in']):+10.2f} pts",
+                  ""]
 
-        order = np.argsort(A["e_in"].ravel())[::-1]
-        L += ["  BIGGEST ENERGY CELLS", "  " + "-" * 60,
-              f"  {'cell':<28}{'drawn':>9}{'loss':>9}{'eff':>9}{'share':>8}"]
-        for k in order[:8]:
+        L += ["  BIGGEST ENERGY CELLS AFTER SHIFTING", "  " + "-" * 62,
+              f"  {'cell':<28}{'drawn':>9}{'loss':>10}{'eff':>9}{'share':>8}"]
+        for k in np.argsort(A["e_in"].ravel())[::-1][:8]:
             i, j = np.unravel_index(k, A["e_in"].shape)
             if A["e_in"][i, j] <= 0:
                 break
-            L.append(f"  {cell(i,j):<28}{A['e_in'][i,j]:8.4f} "
-                     f"{1000*A['loss'][i,j]:7.1f} Wh{A['eff'][i,j]:8.2%}"
-                     f"{100*A['e_in'][i,j]/A['total_in']:7.1f} %")
+            L.append(f"  {cell(i,j):<28}{A['e_in'][i,j]:8.4f} {1000*A['loss'][i,j]:8.1f} Wh"
+                     f"{A['eff'][i,j]:8.2%}{100*A['e_in'][i,j]/A['total_in']:7.1f} %")
 
-        order_l = np.argsort(A["loss"].ravel())[::-1]
-        L += ["", "  BIGGEST LOSS CELLS - where the money actually goes",
-              "  " + "-" * 60,
-              f"  {'cell':<28}{'loss':>10}{'eff':>9}{'share of loss':>15}"]
-        for k in order_l[:6]:
-            i, j = np.unravel_index(k, A["loss"].shape)
-            if A["loss"][i, j] <= 0:
-                break
-            L.append(f"  {cell(i,j):<28}{1000*A['loss'][i,j]:9.1f} Wh"
-                     f"{A['eff'][i,j]:8.2%}{100*A['loss'][i,j]/A['loss'].sum():14.1f} %")
-
-        if B is not None:
-            d = B["e_in"] - A["e_in"]
+        if R is not None:
+            d = A["e_in"] - R["e_in"]
             out_m, in_m = d < -1e-9, d > 1e-9
-            moved = float(-d[out_m].sum())
-            # efficiency of the cells energy left, and of the cells it arrived in
-            eff_from = (np.nansum(-d[out_m] * A["eff"][out_m]) / moved) if moved > 0 else np.nan
-            gained = float(d[in_m].sum())
-            eff_to = (np.nansum(d[in_m] * B["eff"][in_m]) / gained) if gained > 0 else np.nan
-            L += ["", f"  TRANSITION  {rA.upshift:g}/{rA.downshift:g} -> "
-                      f"{rB.upshift:g}/{rB.downshift:g}", "  " + "-" * 60,
-                  f"    energy moved out of cells averaging {eff_from:.2%}",
-                  f"    into cells averaging               {eff_to:.2%}",
-                  f"    amount moved  {moved:.4f} kWh "
-                  f"({100*moved/A['total_in']:.1f} % of the total)",
-                  f"    net effect    motor loss {1000*A['loss'].sum():.1f} Wh -> "
-                  f"{1000*B['loss'].sum():.1f} Wh "
-                  f"({1000*(B['loss'].sum()-A['loss'].sum()):+.1f} Wh)"]
-            if np.isfinite(eff_from) and np.isfinite(eff_to):
-                L.append("    -> " + ("B moves energy into BETTER cells"
-                                      if eff_to > eff_from else
-                                      "B moves energy into WORSE cells"))
-            L += ["", "    Read the transition panel with this: red cells gained energy",
-                  "    under B, blue cells lost it. Compare each against the ridge drawn",
-                  "    on the same axes - a schedule earns its keep by moving energy",
-                  "    toward the ridge, not toward the map's single peak."]
-        L += ["", "  Why bins and not a scatter: a scatter weights an idling sample the",
-              "  same as one pulling 25 Nm. These cells carry ENERGY, so the picture is",
-              "  the energy budget rather than a population count."]
+            moved = float(-d[out_m].sum()); gained = float(d[in_m].sum())
+            eff_from = (np.nansum(-d[out_m] * R["eff"][out_m]) / moved) if moved > 0 else np.nan
+            eff_to = (np.nansum(d[in_m] * A["eff"][in_m]) / gained) if gained > 0 else np.nan
+            L += ["", "  WHAT THE SHIFT SCHEDULE MOVED", "  " + "-" * 62,
+                  f"    {moved:.4f} kWh left cells averaging {eff_from:.2%}",
+                  f"    {gained:.4f} kWh arrived in cells averaging {eff_to:.2%}",
+                  f"    that is {100*moved/R['total_in']:.1f} % of the energy, "
+                  f"relocated {100*(eff_to-eff_from):+.2f} points better"
+                  if np.isfinite(eff_from) and np.isfinite(eff_to) else ""]
+            L += ["", "  CELLS THAT LOST THE MOST", "  " + "-" * 62]
+            for k in np.argsort(d.ravel())[:4]:
+                i, j = np.unravel_index(k, d.shape)
+                if d[i, j] >= -1e-9:
+                    break
+                L.append(f"    {cell(i,j):<28}{1000*d[i,j]:8.1f} Wh   was running at "
+                         f"{R['eff'][i,j]:.2%}")
+            L += ["", "  CELLS THAT GAINED THE MOST", "  " + "-" * 62]
+            for k in np.argsort(d.ravel())[::-1][:4]:
+                i, j = np.unravel_index(k, d.shape)
+                if d[i, j] <= 1e-9:
+                    break
+                L.append(f"    {cell(i,j):<28}{1000*d[i,j]:+8.1f} Wh   now running at "
+                         f"{A['eff'][i,j]:.2%}")
+
+        L += ["",
+              "  The bottom-right panel is the same story in one dimension: how much",
+              "  energy sits in each efficiency band before and after. Bars moving to",
+              "  the right is the schedule earning its keep.",
+              "",
+              "  Cells carry ENERGY, not sample counts - an idling sample at 2 Nm and",
+              "  one pulling 25 Nm are not comparable populations, but they are",
+              "  comparable amounts of energy."]
         return NL.join(L)
 
     def _draw_gradeability(self, df, p, _kind):
