@@ -78,8 +78,16 @@ with the crossover marked.
 ▸ **Optimal gear map** — which ratio wins at every (speed, acceleration) point. The
 boundary is a curve; your shift thresholds are vertical lines drawn on top of it.
 
-**Upshift / Downshift / Combined sweeps** — energy against threshold, with feasibility,
-convergence and the theoretical ceiling reported.
+**Upshift / Downshift / Combined sweeps** — energy against threshold, with mean motor
+efficiency on a second axis, feasibility, convergence, a breakdown of what the optimum
+actually won on (wheel / gearbox / motor / aux / pack), and the theoretical ceiling.
+
+**Efficiency-only optimum** — every schedule ranked on motor efficiency *alone*. The
+auxiliary load, pack resistance, shift energy and torque interruption all cancel out of
+`mean_efficiency`, so nothing competes with the map. Shows the efficiency surface over
+both thresholds, slices through the optimum with net energy overlaid, and where that
+schedule puts the operating cloud. Use it when you want the answer to "which schedule
+keeps the motor in the best part of its map" without any other cost in the way.
 
 ▸ **Gradeability** — maximum sustainable grade at steady speed, per ratio.
 

@@ -55,6 +55,7 @@ ANALYSES = [
     "Upshift sweep",
     "Downshift sweep",
     "Combined grid",
+    "Efficiency-only optimum",   # ranked on motor efficiency alone, nothing else
     "Gradeability",
     "Acceleration run",       # one 0 -> V (-> 0) manoeuvre, swept over the shift speed
     "Efficiency map",
@@ -68,6 +69,7 @@ NEEDS = {                        # analysis -> required data keys
     "Upshift sweep": ("cycle", "map"),
     "Downshift sweep": ("cycle", "map"),
     "Combined grid": ("cycle", "map"),
+    "Efficiency-only optimum": ("cycle", "map"),
     "Gradeability": (),
     "Acceleration run": ("map",),
     "Efficiency map": ("map",),
@@ -632,6 +634,17 @@ class ShiftOptimiserApp(ctk.CTk):
             elif kind == "Acceleration run":
                 out = sc.wot_sweep(self.emap, I["v_target"], I["up_lo"], I["up_hi"],
                                    I["step"], throttle=I["throttle"], **p)
+            elif kind == "Efficiency-only optimum":
+                cost = p["cost"]
+                free = sc.ShiftCost(0.0, 0.0, np.inf,
+                                    min_band_kmh=cost.min_band_kmh,
+                                    min_accel_reserve=cost.min_accel_reserve,
+                                    max_accel_loss=cost.max_accel_loss)
+                out = sc.sweep_efficiency(self.cycle, self.emap,
+                                          I["up_lo"], I["up_hi"], max(I["step"], 1.0),
+                                          I["dn_lo"], I["dn_hi"], max(I["step"], 1.0),
+                                          min_band=I["min_band"],
+                                          **{**p, "cost": free})
             elif kind == "Gradeability":
                 out = sc.gradeability_table(veh=p["veh"], motor=p["motor"], gb=p["gb"])
             elif kind in ("Points on map", "Shift movement"):
@@ -668,10 +681,28 @@ class ShiftOptimiserApp(ctk.CTk):
         self.after(120, self._drain)
 
     # --------------------------------------------------------------- drawing
+    # Explicit, because deriving the method from the first word of the analysis
+    # name silently collides as soon as two analyses share one ("Efficiency map"
+    # and "Efficiency-only optimum" both give "_draw_efficiency").
+    DRAW = {
+        "Single strategy": "_draw_single",
+        "Points on map": "_draw_points",
+        "Shift movement": "_draw_shift",
+        "Gear comparison": "_draw_gear",
+        "Optimal gear map": "_draw_optimal",
+        "Upshift sweep": "_draw_upshift",
+        "Downshift sweep": "_draw_downshift",
+        "Combined grid": "_draw_combined",
+        "Efficiency-only optimum": "_draw_effopt",
+        "Gradeability": "_draw_gradeability",
+        "Acceleration run": "_draw_acceleration",
+        "Efficiency map": "_draw_efficiency",
+    }
+
     def _render(self, kind, out, p):
         self._last_render = (kind, out, p)
         self.fig.clear()
-        getattr(self, "_draw_" + kind.split()[0].lower())(out, p, kind)
+        getattr(self, self.DRAW[kind])(out, p, kind)
         # Layout engine rather than a one-shot tight_layout: the figure is resized
         # by the host after this call and must re-fit itself. set_layout_engine
         # needs matplotlib >= 3.6; fall back so older installs still draw.
@@ -1060,7 +1091,11 @@ class ShiftOptimiserApp(ctk.CTk):
         for A, grp, col, lab in ((ax[0], ups, COLORS["success"], "Upshift  1 -> 2"),
                                  (ax[1], dns, COLORS["warning"], "Downshift  2 -> 1")):
             c = self._signed_background(A, p, tmin, tmax)
-            take = grp[:: max(1, len(grp) // 30)] if len(grp) else grp
+            # every shift, not a sample of thirty: thin the ink instead of the data
+            take = grp
+            dense = max(1, len(take))
+            a_lw = 1.7 if dense <= 40 else (1.1 if dense <= 150 else 0.7)
+            a_al = .95 if dense <= 40 else (.7 if dense <= 150 else .45)
             new_gear = 2 if lab.startswith("Upshift") else 1
             if len(take):
                 cf_n, cf_t = sc.counterfactual_point(r, take, new_gear, p["gb"])
@@ -1069,14 +1104,16 @@ class ShiftOptimiserApp(ctk.CTk):
                 A.annotate("", xy=(cf_n[k], cf_t[k]),
                            xytext=(r.motor_rpm[i], r.motor_torque[i]),
                            arrowprops=dict(arrowstyle="-|>,head_width=.28,head_length=.6",
-                                           color=col, lw=1.7, alpha=.95,
+                                           color=col, lw=a_lw, alpha=a_al,
                                            shrinkA=0, shrinkB=0), zorder=7)
                 # dotted: what the DRIVER does in the same step - demand moving on
                 A.annotate("", xy=(r.motor_rpm[i + 1], r.motor_torque[i + 1]),
                            xytext=(cf_n[k], cf_t[k]),
                            arrowprops=dict(arrowstyle="-|>,head_width=.18,head_length=.4",
-                                           color=COLORS["text_muted"], lw=1.0, ls=":",
-                                           alpha=.8, shrinkA=0, shrinkB=0), zorder=6)
+                                           color=COLORS["text_muted"],
+                                           lw=min(1.0, a_lw), ls=":",
+                                           alpha=min(.8, a_al), shrinkA=0, shrinkB=0),
+                           zorder=6)
             if len(grp):
                 A.scatter(r.motor_rpm[grp], r.motor_torque[grp], s=26, marker="o",
                           facecolor="none", edgecolor=col, lw=1.3, zorder=8,
@@ -1090,7 +1127,7 @@ class ShiftOptimiserApp(ctk.CTk):
                 # the gearbox delta, not the temporal one: same instant, ratio swapped
                 d_n = np.mean(gn - r.motor_rpm[grp])
                 d_t = np.mean(gt - r.motor_torque[grp])
-                A.set_title(f"{lab}   ({len(grp)} events)\n"
+                A.set_title(f"{lab}   ({len(grp)} events, all drawn)\n"
                             f"the ratio alone moves it  {d_n:+.0f} rpm,  {d_t:+.2f} Nm",
                             fontweight="bold", fontsize=11)
                 A.legend(fontsize=7, loc="best", framealpha=.85)
@@ -1442,6 +1479,136 @@ class ShiftOptimiserApp(ctk.CTk):
               "  is a performance test, not the energy question the drive-cycle analyses",
               "  answer. Read them together - the fastest schedule is rarely the",
               "  most efficient one."]
+        return NL.join(L)
+
+    # -------------------------------------------- efficiency-only optimum
+    def _draw_effopt(self, sw, p, _kind):
+        """Rank every schedule on motor efficiency alone.
+
+        mean_efficiency is shaft output over electrical input across the motoring
+        samples, so the auxiliary load, the pack resistance, the shift actuation
+        energy and the torque interruption all cancel out of it. What is left is the
+        one question the energy sweeps keep burying: which schedule keeps the motor
+        in the best part of its map over this cycle.
+        """
+        df = sw.table[sw.table["feasible"]]
+        if df.empty or sw.best is None:
+            self.fig.text(.5, .5, "No feasible schedule in this grid",
+                          ha="center", va="center", color=COLORS["danger"])
+            self.log("No feasible schedule."); return
+
+        b = sw.best
+        e_row = df.loc[df["net_kwh"].idxmin()]       # the energy optimum, for contrast
+
+        gs = self.fig.add_gridspec(2, 2, hspace=.34, wspace=.26)
+        a_map = self.fig.add_subplot(gs[0, 0])
+        a_up = self.fig.add_subplot(gs[0, 1])
+        a_dn = self.fig.add_subplot(gs[1, 0])
+        a_pts = self.fig.add_subplot(gs[1, 1])
+
+        # --- 1. the efficiency surface over both thresholds ------------------
+        piv = df.pivot_table(index="downshift", columns="upshift",
+                             values="mean_efficiency")
+        m = a_map.pcolormesh(piv.columns, piv.index, piv.to_numpy() * 100,
+                             shading="auto", cmap=self._map_style()["cmap"])
+        self._colorbar(m, a_map, "Mean motor efficiency [%]")
+        a_map.scatter([b.upshift], [b.downshift], marker="*", s=280, zorder=6,
+                      facecolor="w", edgecolor="k", lw=1.4,
+                      label=f"best efficiency {b.upshift:g}/{b.downshift:g}")
+        a_map.scatter([e_row["upshift"]], [e_row["downshift"]], marker="X", s=150,
+                      zorder=6, facecolor=COLORS["danger"], edgecolor="k", lw=1.2,
+                      label=f"best energy {e_row['upshift']:g}/{e_row['downshift']:g}")
+        a_map.set_xlabel("Upshift [km/h]"); a_map.set_ylabel("Downshift [km/h]")
+        a_map.set_title("Motor efficiency over the schedule grid",
+                        fontweight="bold", fontsize=11)
+        a_map.legend(fontsize=8, loc="upper left")
+
+        # --- 2/3. slices through the optimum --------------------------------
+        for ax, col, fixed_col, fixed_val, xlabel in (
+                (a_up, "upshift", "downshift", b.downshift, "1-2 upshift speed [km/h]"),
+                (a_dn, "downshift", "upshift", b.upshift, "2-1 downshift speed [km/h]")):
+            sl = df[np.isclose(df[fixed_col], fixed_val)].sort_values(col)
+            if sl.empty:
+                ax.axis("off"); continue
+            ax.plot(sl[col], sl["mean_efficiency"] * 100, "o-", ms=4,
+                    color=COLORS["warning"], label="motor efficiency")
+            ax.scatter([getattr(b, col)], [b.mean_efficiency * 100], s=150, zorder=6,
+                       facecolor=COLORS["warning"], edgecolor="k", lw=1.2)
+            ax.set_ylabel("Mean motor efficiency [%]", color=COLORS["warning"])
+            ax.tick_params(axis="y", labelcolor=COLORS["warning"])
+            ax2 = ax.twinx()
+            ax2.plot(sl[col], sl["net_kwh"], "s--", ms=3, alpha=.75,
+                     color=COLORS["primary"], label="net energy")
+            ax2.set_ylabel("Net energy [kWh]", color=COLORS["primary"])
+            ax2.tick_params(axis="y", labelcolor=COLORS["primary"])
+            ax.set_xlabel(xlabel)
+            ax.set_title(f"{col} at {fixed_col} {fixed_val:g} km/h",
+                         fontweight="bold", fontsize=11)
+            ax.grid(alpha=.3)
+
+        # --- 4. where that schedule puts the motor ---------------------------
+        r = sc.simulate(self.cycle, self.emap, b.upshift, b.downshift,
+                        keep_arrays=True, **p)
+        c = self._map_background(a_pts, p, alpha=.75)
+        if r.gear is not None:
+            act = (np.abs(r.motor_torque) > 1e-9) & (r.motor_torque > 0)
+            for gear, colr, mk in ((1, "#ffffff", "o"), (2, "#ffd400", "^")):
+                mm = act & (r.gear == gear)
+                idx = np.flatnonzero(mm)
+                if len(idx) > 4000:
+                    idx = idx[:: int(np.ceil(len(idx) / 4000))]
+                if len(idx):
+                    a_pts.scatter(r.motor_rpm[idx], r.motor_torque[idx], s=7, marker=mk,
+                                  facecolor=colr, edgecolor="k", linewidth=.15,
+                                  alpha=.55, zorder=5,
+                                  label=f"gear {gear} ({int(mm.sum()):,})")
+        a_pts.set_title(f"Operating cloud at {b.upshift:g}/{b.downshift:g}",
+                        fontweight="bold", fontsize=11)
+        a_pts.legend(fontsize=8, loc="upper right")
+        self._colorbar(c, a_pts, "Efficiency [%]", fraction=.045)
+
+        self.fig.suptitle("Shift schedule ranked on motor efficiency alone",
+                          fontweight="bold")
+        self.log(self._effopt_summary(sw, b, e_row, df))
+        self.say(f"Best motor efficiency {b.mean_efficiency:.2%} at "
+                 f"{b.upshift:g}/{b.downshift:g} km/h", "ok")
+
+    def _effopt_summary(self, sw, b, e_row, df):
+        NL = chr(10)
+        lo, hi = df["mean_efficiency"].min(), df["mean_efficiency"].max()
+        L = ["Shift schedule ranked on MOTOR EFFICIENCY alone", "=" * 74, "",
+             "  mean_efficiency = shaft output energy / electrical input energy over",
+             "  the motoring samples. The auxiliary load, the pack resistance, the",
+             "  shift actuation energy and the torque interruption all cancel out of",
+             "  that ratio, so nothing here is competing with the map.", "",
+             f"  {len(df)} feasible schedules on the grid",
+             f"  efficiency spread {lo:.3%} to {hi:.3%}  ({100*(hi-lo):.2f} points)", "",
+             f"  BEST EFFICIENCY   upshift {b.upshift:g} / downshift {b.downshift:g}"
+             f"   ->  {b.mean_efficiency:.3%}",
+             f"                    net energy there {b.net_kwh:.4f} kWh",
+             f"  BEST ENERGY       upshift {e_row['upshift']:g} / downshift "
+             f"{e_row['downshift']:g}   ->  {e_row['mean_efficiency']:.3%}",
+             f"                    net energy there {e_row['net_kwh']:.4f} kWh", ""]
+        d_eff = 100 * (b.mean_efficiency - e_row["mean_efficiency"])
+        d_net = 1000 * (b.net_kwh - e_row["net_kwh"])
+        if abs(b.upshift - e_row["upshift"]) < 1e-9 and \
+           abs(b.downshift - e_row["downshift"]) < 1e-9:
+            L.append("  The two agree: on this cycle the most efficient schedule is also")
+            L.append("  the cheapest one, so nothing is being traded away.")
+        else:
+            L += [f"  They differ. Going for peak efficiency buys {d_eff:+.3f} points and",
+                  f"  costs {d_net:+.1f} Wh of net energy - that gap is the price the rest",
+                  "  of the system charges for sitting in the efficient place (shift",
+                  "  interruptions, reflected inertia, pack current)."]
+        L += ["",
+              "  Read the two slices together: the orange curve is what the motor map",
+              "  wants, the blue dashed curve is what the battery pays. Where they",
+              "  disagree, the difference is not efficiency - look at 'What the optimum",
+              "  actually wins on' in the energy sweeps to see which term it is.",
+              "",
+              f"  CONVERGED : {sw.converged}"]
+        if sw.boundary_note:
+            L.append("  NOTE      : " + sw.boundary_note)
         return NL.join(L)
 
     def _draw_gradeability(self, df, p, _kind):

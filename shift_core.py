@@ -40,7 +40,7 @@ __all__ = [
     "Vehicle", "Motor", "Gearbox", "Electrical", "ShiftCost", "Numerics",
     "EfficiencyMap", "CycleData", "ShiftResult", "SweepResult",
     "load_cycle", "load_efficiency_map", "simulate", "sweep_upshift",
-    "sweep_downshift", "sweep_grid", "gear_breakdown",
+    "sweep_downshift", "sweep_grid", "sweep_efficiency", "gear_breakdown",
     "wot_run", "wot_sweep", "tractive_force", "road_load_force",
     "oracle_bound", "shift_decomposition", "counterfactual_point",
     "accel_capability", "energy_breakdown",
@@ -1185,6 +1185,63 @@ def counterfactual_point(res: ShiftResult, idx: np.ndarray, new_gear: int,
     rpm = res.motor_rpm[idx] * new / old
     torque = res.motor_torque[idx] * (old * old_eta) / (new * new_eta)
     return rpm, torque
+
+
+# ---------------------------------------------------------------------------
+# Shift schedule ranked on motor efficiency alone
+# ---------------------------------------------------------------------------
+def sweep_efficiency(cycle: CycleData, emap: EfficiencyMap,
+                     up_lo=8.0, up_hi=42.0, up_step=2.0,
+                     dn_lo=4.0, dn_hi=30.0, dn_step=2.0,
+                     min_band=1.0, **kw) -> SweepResult:
+    """Rank schedules by energy-weighted mean MOTOR efficiency over the cycle.
+
+    ``ShiftResult.mean_efficiency`` is shaft output energy over electrical input
+    energy across the motoring samples. It contains nothing but the map: the
+    auxiliary load, the pack resistance, the shift actuation energy and the torque
+    interruption all cancel out of it, because none of them appear in either
+    integral. So maximising it answers exactly one question -
+
+        which shift schedule keeps the motor in the best part of its map,
+        over this drive cycle, ignoring every other cost?
+
+    That is a different question from minimising battery energy, and the two do not
+    have to agree. Where they disagree, the difference is the price the rest of the
+    system charges for sitting in the efficient place.
+
+    The reflected rotor inertia is deliberately still in here: it changes the wheel
+    demand, hence the operating point, hence the efficiency actually achieved.
+    """
+    rows, details, ups, dns = [], [], [], []
+    for u in np.arange(up_lo, up_hi + up_step / 2, up_step):
+        for d in np.arange(dn_lo, dn_hi + dn_step / 2, dn_step):
+            if u - d < min_band:
+                continue
+            r = simulate(cycle, emap, u, d, **kw)
+            rows.append(r.row()); details.append(r); ups.append(u); dns.append(d)
+
+    table = pd.DataFrame(rows)
+    ok = [r for r in details if r.feasible and np.isfinite(r.mean_efficiency)]
+    if not ok:
+        return SweepResult(table, None, False, "no feasible candidate", details)
+
+    top = max(r.mean_efficiency for r in ok)
+    tied = [r for r in ok if r.mean_efficiency >= top - 1e-12]
+    tied.sort(key=lambda r: (r.upshift, r.downshift))
+    best = tied[len(tied) // 2]
+
+    u_arr, d_arr = np.asarray(ups, float), np.asarray(dns, float)
+    notes = []
+    if len(tied) > 1:
+        notes.append(f"{len(tied)} schedules tie at {top:.4%}")
+    on_edge = (abs(best.upshift - u_arr.min()) < up_step / 2
+               or abs(best.upshift - u_arr.max()) < up_step / 2
+               or abs(best.downshift - d_arr.min()) < dn_step / 2
+               or abs(best.downshift - d_arr.max()) < dn_step / 2)
+    if on_edge:
+        notes.append(f"best efficiency {best.upshift:g}/{best.downshift:g} sits on the "
+                     f"edge of the searched grid - widen it")
+    return SweepResult(table, best, not on_edge, "; ".join(notes), details)
 
 
 # ---------------------------------------------------------------------------
