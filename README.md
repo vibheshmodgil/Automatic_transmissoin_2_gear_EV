@@ -65,7 +65,18 @@ acceleration and cumulative energy — each one toggleable, with a time-window s
 you can read a 300 s slice instead of 28,000 samples squeezed into 900 pixels.
 
 **Points on map** — where the cycle actually sits on the efficiency map, per gear,
-motoring and braking.
+motoring and braking. Tick **Colour points by gear choice** and every point is scored
+against the per-sample right answer: green where the engaged ratio really was the more
+efficient one, red where it was not. The summary reports the share of energy delivered
+through the better ratio — 71.8 % at the efficiency optimum against 36.0 % at a bad
+schedule on the sample data. **This is the view that justifies a shift schedule.**
+
+A note on why it is this view and not *Shift movement*: a shift happens under
+acceleration, where the LOW ratio is the efficient one, so the arrow at the instant
+legitimately points the wrong way (−1.83 points at the upshift). The cycle then settles to
+cruise, where the HIGH ratio is worth +6.87 points over the 18,091 samples spent there.
+The shift view shows the first of those and none of the second, so it can never justify an
+optimum on its own.
 
 **Shift movement** — what each gear change does to the operating point. Draws the
 gearbox effect (same instant, ratio swapped) and the driver's demand change as

@@ -43,7 +43,7 @@ __all__ = [
     "sweep_downshift", "sweep_grid", "sweep_efficiency", "gear_breakdown",
     "wot_run", "wot_sweep", "tractive_force", "road_load_force",
     "oracle_bound", "shift_decomposition", "counterfactual_point",
-    "accel_capability", "energy_breakdown",
+    "accel_capability", "energy_breakdown", "better_gear_per_sample",
 ]
 
 # numpy 1.x / 2.x compatible trapezoid rule (VMI pins numpy==1.26.4)
@@ -1054,6 +1054,28 @@ def energy_breakdown(res: ShiftResult, cycle: CycleData, veh: Vehicle = None,
     return dict(wheel=e_wheel, gearbox=e_shaft - e_wheel, motor=e_elec - e_shaft,
                 aux=e_aux, pack=e_batt - e_elec - e_aux, battery=e_batt,
                 efficiency=e_shaft / e_elec if e_elec > 0 else np.nan)
+
+
+def better_gear_per_sample(cycle: CycleData, emap: EfficiencyMap, veh: Vehicle = None,
+                           motor: Motor = None, gb: Gearbox = None,
+                           num: Numerics = None):
+    """Which ratio would be more efficient at each sample, judged independently.
+
+    Returns ``(better, valid)``: ``better`` is 1 or 2 per sample, ``valid`` marks the
+    samples where both ratios have a usable efficiency and the motor is pulling.
+
+    This is what makes a schedule auditable. A shift schedule is a guess about which
+    ratio to engage; this says what the right answer was, sample by sample, so the
+    guess can be scored point by point instead of only in aggregate.
+    """
+    veh = veh or Vehicle(); motor = motor or Motor(); gb = gb or Gearbox()
+    num = num or Numerics()
+    G = _both_gears(cycle, emap, veh, motor, gb, num)
+    e1, e2 = G[1]["eff"], G[2]["eff"]
+    valid = (G[1]["active"] & (G[1]["p_wheel"] > 0)
+             & np.isfinite(e1) & np.isfinite(e2) & (e1 < 1.0) & (e2 < 1.0))
+    better = np.where(np.nan_to_num(e1, nan=-1.0) >= np.nan_to_num(e2, nan=-1.0), 1, 2)
+    return better.astype(np.int8), valid
 
 
 def oracle_bound(cycle: CycleData, emap: EfficiencyMap, veh: Vehicle = None,

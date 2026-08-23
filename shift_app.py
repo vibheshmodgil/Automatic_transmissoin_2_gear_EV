@@ -399,6 +399,7 @@ class ShiftOptimiserApp(ctk.CTk):
         self.disp["envelope"] = self._check(left, "Envelope + peak marker", True)
         self.disp["negative"] = self._check(left, "Negative-torque (braking) half", True)
         self.disp["isopower"] = self._check(left, "Iso-power lines [kW]", False)
+        self.disp["bygear"] = self._check(left, "Colour points by gear choice", False)
         # Spread the whole colormap over the band the vehicle actually works in.
         # Across 0-100 % everything above ~80 % is the same yellow and a 3-point
         # efficiency difference - which is the entire result of this study - simply
@@ -1034,8 +1035,13 @@ class ShiftOptimiserApp(ctk.CTk):
                           ha="center", va="center", color=COLORS["danger"])
             self.log("INFEASIBLE\n" + "\n".join("  - " + x for x in r.reasons)); return
         signed = self.disp["negative"].get()
+        by_choice = self.disp["bygear"].get()
         em = self.emap
         act = np.abs(r.motor_torque) > 1e-9
+        if by_choice:
+            better, valid = sc.better_gear_per_sample(
+                self.cycle, self.emap, veh=p["veh"], motor=p["motor"], gb=p["gb"],
+                num=p["num"])
         ax = self.fig.subplots(1, 2, sharex=True, sharey=True)
         if signed:
             lim = min(em.torque.max(), p["motor"].peak_torque)
@@ -1045,9 +1051,14 @@ class ShiftOptimiserApp(ctk.CTk):
             c = (self._signed_background(a, p, tlo, thi, alpha=.8) if signed
                  else self._map_background(a, p, alpha=.8))
             base = act & (r.gear == gear)
-            groups = [(base & (r.motor_torque > 0), "motoring", .55, col, mk)]
-            if signed:
-                groups.append((base & (r.motor_torque < 0), "braking", .5, "none", mk))
+            if by_choice:
+                pull = base & (r.motor_torque > 0) & valid
+                groups = [(pull & (better == gear), "RIGHT ratio", .6, "#1a7f4b", mk),
+                          (pull & (better != gear), "wrong ratio", .6, "#c62828", mk)]
+            else:
+                groups = [(base & (r.motor_torque > 0), "motoring", .55, col, mk)]
+                if signed:
+                    groups.append((base & (r.motor_torque < 0), "braking", .5, "none", mk))
             for m, lab, alpha, face, marker in groups:
                 idx = np.flatnonzero(m)
                 if not len(idx):
@@ -1062,7 +1073,9 @@ class ShiftOptimiserApp(ctk.CTk):
                         fontweight="bold")
             # upper-left: the high-torque/low-rpm corner is empty in both panels,
             # and on the signed axes "upper right" collides with the colour bar
-            a.legend(fontsize=8, loc="upper left" if signed else "upper right")
+            # upper-left always: the high-torque/low-rpm corner is outside the
+            # envelope in both modes, and "upper right" collides with the colour bar
+            a.legend(fontsize=8, loc="upper left", framealpha=.9)
         if signed:
             ax[0].set_ylabel("Signed motor torque [Nm]\n(+ motoring,  - braking)")
         self._colorbar(c, ax, "Efficiency [%]" + ("  (negative half mirrored)" if signed
@@ -1072,6 +1085,7 @@ class ShiftOptimiserApp(ctk.CTk):
 
         L = ["Operating points on the efficiency map", "=" * 74, ""]
         L += self._gear_table(r)
+        L += self._choice_score(r, p)
         L += ["",
               "  These are the same figures the Single-strategy summary prints; both are",
               "  built by shift_core.gear_breakdown() so they cannot drift apart.",
@@ -1088,6 +1102,45 @@ class ShiftOptimiserApp(ctk.CTk):
         self.log("\n".join(L))
         self.say("Operating cloud plotted" + (" with the braking half" if signed else ""),
                  "ok")
+
+    def _choice_score(self, r, p):
+        """How often this schedule engaged the ratio that was actually better.
+
+        A shift schedule is a guess. This scores the guess against the per-sample
+        right answer, weighted by the work being done - which is the audit the
+        'Shift movement' view cannot provide, because a shift happens under
+        acceleration where the LOW ratio wins, while the benefit is collected
+        afterwards at cruise where the HIGH ratio wins.
+        """
+        try:
+            better, valid = sc.better_gear_per_sample(
+                self.cycle, self.emap, veh=p["veh"], motor=p["motor"], gb=p["gb"],
+                num=p["num"])
+            ratios = np.where(r.gear == 1, p["gb"].ratio_1, p["gb"].ratio_2)
+            t_w, n_w, p_w = sc.road_load(self.cycle, p["veh"], p["motor"], p["gb"],
+                                         p["num"], ratios)
+            use = valid & (p_w > 0)
+            w = np.where(use, p_w, 0.0)
+            right = use & (r.gear == better)
+            e_all = sc._trapz(w, self.cycle.time) / 3.6e6
+            e_right = sc._trapz(np.where(right, p_w, 0.0), self.cycle.time) / 3.6e6
+            if e_all <= 0:
+                return []
+        except Exception:
+            return []
+        return ["", "  DID THIS SCHEDULE PICK THE RIGHT RATIO?", "  " + "-" * 56,
+                f"    energy delivered through the better ratio  "
+                f"{100*e_right/e_all:5.1f} %",
+                f"    energy delivered through the worse ratio   "
+                f"{e_all-e_right:5.3f} kWh",
+                "    Tick 'Colour points by gear choice' to see which points those are.",
+                "",
+                "    A shift happens under acceleration, where the LOW ratio is the",
+                "    efficient one, so the arrow in 'Shift movement' points the wrong",
+                "    way at the instant. The cycle then settles to cruise, where the",
+                "    HIGH ratio is worth several points, and that is where the gain is",
+                "    collected. That is why the shift view cannot justify a schedule",
+                "    and this score can."]
 
     def _signed_background(self, ax, p, tmin, tmax, alpha=0.72):
         """Efficiency contours mirrored about zero torque, so braking points show.
