@@ -138,9 +138,13 @@ SIGNALS = [
     ("energy", "Cumulative energy",  False),
 ]
 WINDOWS = ["full cycle", "3600 s", "1800 s", "600 s", "300 s", "120 s", "60 s"]
-# operating-cloud colours: dark, because the cycle sits on the bright end of viridis
-CLOUD_G1 = "#10265e"      # deep blue
-CLOUD_G2 = "#a30f45"      # crimson
+# ONE colour per gear, everywhere. A reader should never have to re-learn which
+# colour means which ratio between two panels of the same study.
+GEAR1 = "#10265e"         # deep blue  - the low ratio
+GEAR2 = "#a30f45"         # crimson    - the high ratio
+CLOUD_G1, CLOUD_G2 = GEAR1, GEAR2
+GOOD = "#1a7f4b"
+BAD = "#c62828"
 ISO_POWER_KW = [0.25, 0.5, 1, 2, 3, 5, 8, 11]
 CMAPS = ["viridis", "plasma", "magma", "cividis", "turbo", "coolwarm", "Greys"]
 # how to split the operating cloud in "Points on map" - each answers a different
@@ -846,8 +850,38 @@ class ShiftOptimiserApp(ctk.CTk):
                 self.fig.tight_layout()
             except Exception:
                 pass
+        self._footnote(kind)
         self._fit_canvas(kind)
         self.canvas.draw()
+
+    def _footnote(self, kind):
+        """Stamp every figure with what produced it.
+
+        A figure pasted into a deck is separated from the app that made it. Without
+        the schedule, the source files and the data caveat travelling with it, the
+        reader has no way to know what they are looking at - and the synthetic-data
+        warning is exactly the thing that must not get lost.
+        """
+        bits = []
+        if self.cycle is not None:
+            bits.append(f"cycle {self.cycle.name}  ({self.cycle.distance_km:.0f} km, "
+                        f"{self.cycle.duration/3600:.1f} h)")
+        if self.emap is not None:
+            bits.append(f"map peak {self.emap.peak[0]:.1%} @ {self.emap.peak[1]:.0f} rpm "
+                        f"/ {self.emap.peak[2]:.1f} Nm")
+        if kind not in ("Gradeability", "Efficiency map", "Gear comparison",
+                        "Optimal gear map", "Acceleration run"):
+            bits.append(f"upshift {self._f('thr','upshift',22):g} / downshift "
+                        f"{self._f('thr','downshift',10):g} km/h")
+        p_txt = (f"m {self._f('veh','mass',995):g} kg  "
+                 f"ratios {self._f('gb','ratio_1',19):g}/{self._f('gb','ratio_2',11):g}  "
+                 f"motor {self._f('mot','peak_torque',45):g} Nm / "
+                 f"{self._f('mot','peak_power',11000)/1000:g} kW")
+        line = " | ".join(bits) if bits else ""
+        self.fig.text(.008, .012, line, fontsize=6.6, color="#7a848d", ha="left",
+                      va="bottom")
+        self.fig.text(.992, .012, p_txt, fontsize=6.6, color="#7a848d", ha="right",
+                      va="bottom")
 
     def _fit_canvas(self, kind):
         """Canvas height: the user's if they set one, otherwise fitted to the view.
@@ -974,44 +1008,62 @@ class ShiftOptimiserApp(ctk.CTk):
             if self.disp["marks"].get() and 0 < len(shifts) <= 120:
                 for i in shifts:
                     a.axvline(t[i], color=COLORS["accent"], lw=.6, alpha=.35, zorder=0)
-            a.set_ylabel(lab, fontsize=10)
-            a.grid(alpha=.3)
-        ax[-1].set_xlabel("Time [s]")
+            # Horizontal, outside the axes. A rotated label is taller than a 90 px
+            # panel, so with six stacked traces the neighbouring labels overlap each
+            # other - which is what made this figure unreadable.
+            a.set_ylabel(lab, fontsize=9, rotation=0, ha="right", va="center")
+            a.yaxis.set_label_coords(-0.055, 0.5)   # clear of the tick numbers
+            a.tick_params(labelsize=8.5)
+            a.grid(alpha=.25)
+        ax[-1].set_xlabel("Time [s]", fontsize=10)
         ax[0].set_xlim(lo, hi)
 
-        win = (f"{lo:.0f}-{hi:.0f} s of {t[-1]:.0f} s"
-               if self.disp["window"].get()[0].isdigit() else "full cycle")
-        self.fig.suptitle(f"Upshift {r.upshift:g} / downshift {r.downshift:g} km/h"
-                          f"   —   {win}   —   {len(shifts)} gear changes shown",
-                          fontweight="bold")
+        full_view = not self.disp["window"].get()[0].isdigit()
+        win = ("the full cycle" if full_view
+               else f"{lo:.0f}-{hi:.0f} s of {t[-1]:.0f} s")
+        self.fig.suptitle(f"Cycle traces at upshift {r.upshift:g} / downshift "
+                          f"{r.downshift:g} km/h   —   {r.net_kwh:.3f} kWh, "
+                          f"{r.wh_per_km:.1f} Wh/km", fontweight="bold", fontsize=12.5)
+        ax[0].set_title(f"{win} · {len(shifts)} gear changes in view"
+                        + ("  ·  at this scale ~30 samples fall on each pixel — use the "
+                           "TIME WINDOW control to read a slice" if full_view else ""),
+                        fontsize=8.5, color=COLORS["text_muted"], loc="left", pad=4)
         self.log(self._summary(r))
         self.say(f"{r.consumed_kwh:.3f} kWh — {r.wh_per_km:.1f} Wh/km "
                  f"— {len(keys)} signals plotted", "ok")
 
     def _signal(self, r, key, t):
-        """(values, axis label, colour) for one time-series signal."""
+        """(values, axis label, colour) for one time-series signal.
+
+        Labels are short and two-line because they are drawn horizontally beside a
+        stacked panel: a rotated label is taller than a 90 px panel and neighbouring
+        ones then overlap each other.
+        """
         if key == "speed":
-            return self.cycle.speed_kmh, "Speed [km/h]", COLORS["primary"]
+            return self.cycle.speed_kmh, "Speed\n[km/h]", COLORS["primary"]
         if key == "gear":
             return r.gear.astype(float), "Gear", COLORS["text"]
         if key == "rpm":
-            return r.motor_rpm, "Motor speed [rpm]", COLORS["accent"]
+            return r.motor_rpm, "Motor\n[rpm]", COLORS["accent"]
         if key == "torque":
-            return r.motor_torque, "Motor torque [Nm]", COLORS["warning"]
+            return r.motor_torque, "Torque\n[Nm]", COLORS["warning"]
         if key == "eff":
             # eff is filled with 1.0 wherever the motor is idle - blank those out
             act = (np.abs(r.motor_torque) > 1e-9) & (r.motor_eff < 1.0)
-            return np.where(act, r.motor_eff * 100, np.nan), "Motor eff [%]", COLORS["success"]
+            return (np.where(act, r.motor_eff * 100, np.nan), "Efficiency\n[%]",
+                    COLORS["success"])
         if key == "pbatt":
-            return r.battery_power / 1000.0, "Battery [kW]", COLORS["secondary"]
+            return r.battery_power / 1000.0, "Battery\n[kW]", COLORS["secondary"]
         if key == "pmech":
-            return (r.motor_torque * r.motor_rpm * 2 * np.pi / 60.0) / 1000.0,                    "Shaft power [kW]", "#0891b2"
+            return ((r.motor_torque * r.motor_rpm * 2 * np.pi / 60.0) / 1000.0,
+                    "Shaft\n[kW]", "#0891b2")
         if key == "accel":
-            return np.gradient(self.cycle.speed_kmh / 3.6, t, edge_order=2),                    "Accel [m/s2]", "#7c3aed"
+            return (np.gradient(self.cycle.speed_kmh / 3.6, t, edge_order=2),
+                    "Accel\n[m/s2]", "#7c3aed")
         if key == "energy":
             pos = np.maximum(np.nan_to_num(r.battery_power), 0.0)
             e = np.concatenate([[0.0], np.cumsum(.5 * (pos[1:] + pos[:-1]) * np.diff(t))]) / 3.6e6
-            return e, "Consumed [kWh]", COLORS["danger"]
+            return e, "Cumulative\n[kWh]", COLORS["danger"]
         raise KeyError(key)
 
     def _draw_upshift(self, sw, p, kind):
@@ -1025,21 +1077,32 @@ class ShiftOptimiserApp(ctk.CTk):
         df = sw.table
         ok = df[df["feasible"]]
         bad = df[~df["feasible"]]
-        ax.plot(ok[col], ok["consumed_kwh"], "o-", color=COLORS["primary"],
-                label="feasible", ms=5)
+        ax.plot(ok[col], ok["net_kwh"], "o-", color=COLORS["primary"],
+                label="net energy", ms=5, zorder=4)
+        # rejected candidates as bands, not as points: plotted at an arbitrary height
+        # they read as data and invite the eye to compare them against the curve
+        for xv in bad[col]:
+            ax.axvline(xv, color=COLORS["danger"], lw=6, alpha=.13, zorder=0)
         if len(bad):
-            ax.scatter(bad[col], np.full(len(bad), ok["consumed_kwh"].min()),
-                       marker="x", color=COLORS["danger"], s=40, label="rejected")
+            ax.plot([], [], lw=6, color=COLORS["danger"], alpha=.3,
+                    label=f"rejected by the schedule gates ({len(bad)})")
         if sw.best:
             b = getattr(sw.best, col)
-            ax.scatter([b], [sw.best.consumed_kwh], s=180, zorder=5,
+            ax.scatter([b], [sw.best.net_kwh], s=180, zorder=6,
                        facecolor=COLORS["success"], edgecolor="k", lw=1.2,
                        label=f"best {b:g} km/h")
+            ax.annotate(f"{b:g} km/h\n{sw.best.net_kwh:.3f} kWh",
+                        (b, sw.best.net_kwh), textcoords="offset points",
+                        xytext=(10, 14), fontsize=8.5, fontweight="bold",
+                        color=COLORS["success"],
+                        bbox=dict(boxstyle="round,pad=.25", fc=COLORS["plot_bg"],
+                                  ec=COLORS["success"], lw=.8, alpha=.9))
         lo, hi = df[col].min(), df[col].max()
         for v in (lo, hi):
-            ax.axvline(v, color=COLORS["danger"], ls=":", lw=1.2, alpha=.7)
-        ax.text(lo, ax.get_ylim()[1], " search bound", color=COLORS["danger"],
-                fontsize=8, va="top")
+            ax.axvline(v, color=COLORS["text_muted"], ls=":", lw=1.1, alpha=.6)
+        ax.annotate("searched range", (lo, ax.get_ylim()[0]),
+                    textcoords="offset points", xytext=(4, 4), fontsize=7.5,
+                    color=COLORS["text_muted"])
         # The efficiency curve is the whole point and used to be invisible here: the
         # energy axis alone cannot tell you whether a candidate won by moving the
         # operating points somewhere better or by some other term.
@@ -1053,11 +1116,21 @@ class ShiftOptimiserApp(ctk.CTk):
                 ax2.scatter([getattr(sw.best, col)], [sw.best.mean_efficiency * 100],
                             s=70, zorder=6, facecolor=COLORS["warning"],
                             edgecolor="k", lw=1)
-        ax.set_xlabel(xlabel); ax.set_ylabel("Net energy [kWh]")
-        ax.grid(alpha=.3)
-        ax.legend(fontsize=9, loc="upper left")
-        title = kind + ("" if sw.converged else "  —  NOT CONVERGED")
-        ax.set_title(title, fontweight="bold",
+        ax.set_xlabel(xlabel); ax.set_ylabel("Net battery energy [kWh]")
+        ax.grid(alpha=.25)
+        h1, l1 = ax.get_legend_handles_labels()
+        h2, l2 = (ax2.get_legend_handles_labels() if "mean_efficiency" in df.columns
+                  and len(ok) else ([], []))
+        ax.legend(h1 + h2, l1 + l2, fontsize=8.5, loc="upper left", framealpha=.92)
+        if sw.best is not None and len(ok) > 1:
+            spread = 1000 * (ok["net_kwh"].max() - ok["net_kwh"].min())
+            head = (f"{kind}: best at {getattr(sw.best, col):g} km/h  ·  "
+                    f"{spread:.0f} Wh across the searched range  ·  efficiency "
+                    f"{ok['mean_efficiency'].min():.1%} to {ok['mean_efficiency'].max():.1%}")
+        else:
+            head = kind
+        ax.set_title(head + ("" if sw.converged else "   —   NOT CONVERGED"),
+                     fontweight="bold", fontsize=11.5,
                      color=COLORS["text"] if sw.converged else COLORS["danger"])
         self.log(self._sweep_summary(sw, col))
         self.say(("Converged: " if sw.converged else "NOT converged: ") +
@@ -1071,19 +1144,42 @@ class ShiftOptimiserApp(ctk.CTk):
             self.fig.text(.5, .5, "No feasible candidate", ha="center", color=COLORS["danger"])
             self.log("No feasible candidate in the grid.")
             return
-        piv = df.pivot_table(index="downshift", columns="upshift", values="consumed_kwh")
+        # NET, to match the objective every sweep minimises - the colour bar used to
+        # say "consumed" while the ranking used net, which is a quiet contradiction
+        piv = df.pivot_table(index="downshift", columns="upshift", values="net_kwh")
         m = ax.pcolormesh(piv.columns, piv.index, piv.to_numpy(), shading="auto",
                           cmap=self._map_style()["cmap"])
-        self._colorbar(m, ax, "Consumed energy [kWh]")
+        self._colorbar(m, ax, "Net battery energy [kWh]")
         if sw.best:
-            ax.scatter([sw.best.upshift], [sw.best.downshift], marker="X", s=210,
-                       facecolor=COLORS["success"], edgecolor="k", lw=1.4, zorder=5,
-                       label=f"best {sw.best.upshift:g}/{sw.best.downshift:g}")
-            ax.legend(fontsize=9)
-        ax.set_xlabel("Upshift [km/h]"); ax.set_ylabel("Downshift [km/h]")
-        ax.set_title(kind + ("" if sw.converged else "  —  NOT CONVERGED"),
-                     fontweight="bold",
+            ax.scatter([sw.best.upshift], [sw.best.downshift], marker="X", s=230,
+                       facecolor=COLORS["success"], edgecolor="k", lw=1.4, zorder=5)
+            # label at the marker, not in a corner legend the eye has to pair up
+            ax.annotate(f"best  {sw.best.upshift:g}/{sw.best.downshift:g}\n"
+                        f"{sw.best.net_kwh:.3f} kWh",
+                        (sw.best.upshift, sw.best.downshift),
+                        textcoords="offset points", xytext=(12, 12), fontsize=9,
+                        fontweight="bold", color=COLORS["success"],
+                        bbox=dict(boxstyle="round,pad=.3", fc=COLORS["plot_bg"],
+                                  ec=COLORS["success"], lw=1, alpha=.92),
+                        arrowprops=dict(arrowstyle="-", color=COLORS["success"], lw=1))
+        ax.set_xlabel("1-2 upshift speed [km/h]")
+        ax.set_ylabel("2-1 downshift speed [km/h]")
+        spread = 1000 * (df["net_kwh"].max() - df["net_kwh"].min())
+        ax.set_title(f"Every threshold pair  ·  best "
+                     f"{sw.best.upshift:g}/{sw.best.downshift:g}  ·  {spread:.0f} Wh "
+                     f"between best and worst"
+                     + ("" if sw.converged else "   —   NOT CONVERGED"),
+                     fontweight="bold", fontsize=11.5,
                      color=COLORS["text"] if sw.converged else COLORS["danger"])
+        # label the empty region in place rather than under the x-axis, where it
+        # collided with the provenance footer
+        ax.text(.02, .97,
+                "white = rejected by the schedule gates" + chr(10)
+                + "(band width, acceleration reserve, shift rate)",
+                transform=ax.transAxes, ha="left", va="top", fontsize=8,
+                color=COLORS["text_muted"],
+                bbox=dict(boxstyle="round,pad=.3", fc=COLORS["plot_bg"],
+                          ec=COLORS["border"], lw=.7, alpha=.85))
         self.log(self._sweep_summary(sw, "upshift"))
         self.say(("Converged: " if sw.converged else "NOT converged: ") +
                  f"best {sw.best.upshift:g}/{sw.best.downshift:g}",
@@ -1440,26 +1536,35 @@ class ShiftOptimiserApp(ctk.CTk):
         for a_i, acc in enumerate(accels):
             A = ax[a_i]
             rec = data[acc]
-            A.plot(speeds, rec[1]["eff"] * 100, "-", lw=2, color=COLORS["primary"],
-                   label="Gear 1 (low, high rpm)")
-            A.plot(speeds, rec[2]["eff"] * 100, "-", lw=2, color=COLORS["warning"],
-                   label="Gear 2 (high, low rpm)")
+            A.plot(speeds, rec[1]["eff"] * 100, "-", lw=2.2, color=GEAR1,
+                   label=f"gear 1  (ratio {p['gb'].ratio_1:g} - low, high rpm)")
+            A.plot(speeds, rec[2]["eff"] * 100, "-", lw=2.2, color=GEAR2,
+                   label=f"gear 2  (ratio {p['gb'].ratio_2:g} - high, low rpm)")
             d = rec[1]["eff"] - rec[2]["eff"]
             with np.errstate(invalid="ignore"):
                 cross = np.flatnonzero(np.diff(np.sign(np.nan_to_num(d))) != 0)
             for x in speeds[cross]:
-                A.axvline(x, color=COLORS["danger"], ls="--", lw=1.2)
-                A.text(x, A.get_ylim()[0], f" {x:.0f}", color=COLORS["danger"], fontsize=8)
-            A.set_title(f"a = {acc:g} m/s²", fontsize=11, fontweight="bold")
-            A.set_xlabel("Road speed [km/h]")
-            A.grid(alpha=.3)
+                A.axvline(x, color=COLORS["text"], ls="--", lw=1.1, alpha=.6)
+                A.annotate(f"crossover\n{x:.0f} km/h", (x, A.get_ylim()[0]),
+                           textcoords="offset points", xytext=(4, 8), fontsize=8,
+                           color=COLORS["text"],
+                           bbox=dict(boxstyle="round,pad=.2", fc=COLORS["plot_bg"],
+                                     ec=COLORS["border"], lw=.7, alpha=.9))
+            A.set_title(f"acceleration = {acc:g} m/s²", fontsize=10.5,
+                        fontweight="bold")
+            A.set_xlabel("Road speed [km/h]", fontsize=9.5)
+            A.set_xlim(speeds.min(), speeds.max())      # same axis on every panel
+            A.tick_params(labelsize=8.5)
+            A.grid(alpha=.25)
             if a_i == 0:
                 A.set_ylabel("Motor efficiency [%]")
                 lines = A.get_legend_handles_labels()
-        self.fig.legend(*lines, loc="lower center", ncol=2, fontsize=10,
-                        bbox_to_anchor=(.5, -.02))
+        # inside the first panel, not below the figure: subplots_adjust is ignored by
+        # the tight layout engine, so a figure-level legend lands on the x-labels
+        if lines and lines[0]:
+            ax[0].legend(*lines, loc="lower left", fontsize=8, framealpha=.92)
         self.fig.suptitle("Which ratio is more efficient — and how that flips with load",
-                          fontweight="bold")
+                          fontweight="bold", fontsize=12.5, y=.98)
         txt = ["Gear efficiency vs load", "=" * 74,
                f"{'accel':>8} | {'winner at 10':>14}{'20':>10}{'30':>10}{'40':>10}"]
         for acc in accels:
@@ -1488,25 +1593,38 @@ class ShiftOptimiserApp(ctk.CTk):
         sp, ac, better, delta, f1, f2 = payload
         ax = self.fig.subplots(1, 2)
         from matplotlib.colors import ListedColormap
-        cm = ListedColormap([COLORS["primary"], COLORS["warning"]])
+        cm = ListedColormap([GEAR1, GEAR2])       # the same two colours as everywhere
         ax[0].pcolormesh(sp, ac, np.ma.masked_invalid(better), cmap=cm, shading="auto",
                          vmin=1, vmax=2)
         ax[0].contour(sp, ac, np.nan_to_num(better, nan=0), levels=[1.5],
                       colors="k", linewidths=2)
         up = self._f("thr", "upshift", 22)
         dn = self._f("thr", "downshift", 10)
-        ax[0].axvline(up, color=COLORS["success"], lw=2.5, label=f"upshift {up:g}")
-        ax[0].axvline(dn, color=COLORS["danger"], lw=2.5, ls="--", label=f"downshift {dn:g}")
+        ax[0].axvline(up, color="#ffffff", lw=3.2)
+        ax[0].axvline(up, color=COLORS["success"], lw=2, label=f"your upshift {up:g} km/h")
+        ax[0].axvline(dn, color="#ffffff", lw=3.2)
+        ax[0].axvline(dn, color=COLORS["success"], lw=2, ls="--",
+                      label=f"your downshift {dn:g} km/h")
         ax[0].set_xlabel("Road speed [km/h]"); ax[0].set_ylabel("Acceleration [m/s²]")
-        ax[0].set_title("Which ratio is more efficient\n"
-                        "blue = gear 1   yellow = gear 2", fontweight="bold")
-        ax[0].legend(fontsize=9, loc="upper right")
+        # the label used to say "yellow" while the map drew orange
+        ax[0].set_title("Which ratio is more efficient at each operating point",
+                        fontweight="bold", fontsize=11)
+        from matplotlib.patches import Patch
+        ax[0].legend(handles=[Patch(facecolor=GEAR1, label="gear 1 wins"),
+                              Patch(facecolor=GEAR2, label="gear 2 wins")]
+                     + ax[0].get_legend_handles_labels()[0],
+                     fontsize=8.5, loc="lower right", framealpha=.92)
+        ax[0].text(.5, -.135, "black line = the true boundary. Your thresholds are "
+                              "vertical lines and cannot follow a curve.",
+                   transform=ax[0].transAxes, ha="center", fontsize=8,
+                   color=COLORS["text_muted"])
         m = ax[1].pcolormesh(sp, ac, np.ma.masked_invalid(delta), cmap="magma", shading="auto")
         self._colorbar(m, ax[1], "Advantage of the better ratio [pts]")
-        ax[1].axvline(up, color=COLORS["success"], lw=2.5)
-        ax[1].axvline(dn, color=COLORS["danger"], lw=2.5, ls="--")
+        ax[1].axvline(up, color="#ffffff", lw=3.2); ax[1].axvline(up, color=COLORS["success"], lw=2)
+        ax[1].axvline(dn, color="#ffffff", lw=3.2)
+        ax[1].axvline(dn, color=COLORS["success"], lw=2, ls="--")
         ax[1].set_xlabel("Road speed [km/h]"); ax[1].set_ylabel("Acceleration [m/s²]")
-        ax[1].set_title("How much it matters", fontweight="bold")
+        ax[1].set_title("How much the choice is worth", fontweight="bold", fontsize=11)
         g1 = np.nansum(better == 1); g2 = np.nansum(better == 2)
         big = np.nansum(delta > 3)
         self.log(
@@ -2065,15 +2183,22 @@ class ShiftOptimiserApp(ctk.CTk):
 
     def _draw_gradeability(self, df, p, _kind):
         ax = self.fig.subplots()
-        ax.plot(df["Speed [km/h]"], df["Gear 1 max grade [deg]"], "o-",
-                color=COLORS["primary"], label=f"Gear 1 (ratio {p['gb'].ratio_1:g})")
-        ax.plot(df["Speed [km/h]"], df["Gear 2 max grade [deg]"], "s-",
-                color=COLORS["warning"], label=f"Gear 2 (ratio {p['gb'].ratio_2:g})")
+        ax.plot(df["Speed [km/h]"], df["Gear 1 max grade [deg]"], "o-", lw=2.2,
+                color=GEAR1, label=f"gear 1  (ratio {p['gb'].ratio_1:g})")
+        ax.plot(df["Speed [km/h]"], df["Gear 2 max grade [deg]"], "s-", lw=2.2,
+                color=GEAR2, label=f"gear 2  (ratio {p['gb'].ratio_2:g})")
         ax.fill_between(df["Speed [km/h]"], df["Gear 2 max grade [deg]"],
-                        df["Gear 1 max grade [deg]"], alpha=.18,
-                        color=COLORS["primary"], label="Gear 1 advantage")
-        ax.set_xlabel("Steady speed [km/h]"); ax.set_ylabel("Max sustainable grade [deg]")
-        ax.set_title("Gradeability — what the low gear is for", fontweight="bold")
+                        df["Gear 1 max grade [deg]"], alpha=.16,
+                        color=GEAR1, label="what the low ratio adds")
+        ax.set_xlabel("Steady speed [km/h]")
+        ax.set_ylabel("Maximum sustainable grade [deg]")
+        adv_lim = df[df["Gear 1 max grade [deg]"]
+                     > df["Gear 2 max grade [deg]"] + 1e-9]["Speed [km/h]"]
+        head = "Gradeability — the low ratio's real job"
+        if len(adv_lim):
+            head += (f"  ·  it adds climbing ability only below "
+                     f"{adv_lim.max():.0f} km/h")
+        ax.set_title(head, fontweight="bold", fontsize=11.5)
         ax.grid(alpha=.3); ax.legend(fontsize=9)
         adv = df[df["Gear 1 max grade [deg]"] > df["Gear 2 max grade [deg]"] + 1e-9]
         txt = ["Gradeability", "=" * 74,
@@ -2096,6 +2221,7 @@ class ShiftOptimiserApp(ctk.CTk):
         c = self._contours(ax, R, T, eff, 1.0, st)
         self._colorbar(c, ax, "Efficiency [%]")
         pk, pr, pt = em.peak
+        pw = pt * pr * 2 * np.pi / 60      # shaft power at the peak cell
         if st["envelope"]:
             n = np.linspace(1, p["motor"].max_rpm, 500)
             ax.plot(n, p["motor"].envelope(n), color=COLORS["danger"], lw=2.5,
@@ -2106,8 +2232,9 @@ class ShiftOptimiserApp(ctk.CTk):
             ax.legend(fontsize=8, loc="upper right")
         ax.set_xlim(0, em.rpm.max()); ax.set_ylim(0, em.torque.max())
         ax.set_xlabel("Motor speed [rpm]"); ax.set_ylabel("Motor torque [Nm]")
-        ax.set_title("Motor efficiency map", fontweight="bold")
-        pw = pt * pr * 2 * np.pi / 60
+        ax.set_title(f"Motor efficiency map  ·  peak {pk:.2%} at {pr:.0f} rpm / "
+                     f"{pt:.1f} Nm  =  {pw/1000:.2f} kW of shaft power",
+                     fontweight="bold", fontsize=11.5)
         self.log(f"Efficiency map\n{'='*74}\n"
                  f"  grid            : {em.eff.shape[0]} torque x {em.eff.shape[1]} speed\n"
                  f"  blank cells     : {em.missing.sum():,} of {em.eff.size:,} "
