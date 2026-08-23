@@ -399,6 +399,8 @@ class ShiftOptimiserApp(ctk.CTk):
         self.disp["envelope"] = self._check(left, "Envelope + peak marker", True)
         self.disp["negative"] = self._check(left, "Negative-torque (braking) half", True)
         self.disp["isopower"] = self._check(left, "Iso-power lines [kW]", False)
+        self.disp["ridge"] = self._check(left, "Efficiency ridge (best rpm per torque)",
+                                         False)
         self.disp["bygear"] = self._check(left, "Colour points by gear choice", False)
         # Spread the whole colormap over the band the vehicle actually works in.
         # Across 0-100 % everything above ~80 % is the same yellow and a 3-point
@@ -460,6 +462,24 @@ class ShiftOptimiserApp(ctk.CTk):
                     labels=self.disp["clabels"].get(),
                     envelope=self.disp["envelope"].get(),
                     cmap=self.disp["cmap"].get())
+
+    def _ridge(self, ax, signed=False):
+        """The best rpm for each torque - the curve a schedule should sit on.
+
+        Not the map's peak cell. That cell is only the optimum at its own torque,
+        and a cycle running at a third of that torque wants a completely different
+        speed. Judging a shift schedule against the peak instead of against this
+        curve is the single most common way to reach the wrong conclusion.
+        """
+        if not self.disp["ridge"].get():
+            return
+        try:
+            t, n = sc.efficiency_ridge(self.emap)
+        except Exception:
+            return
+        for sign in ((1, -1) if signed else (1,)):
+            ax.plot(n, sign * t, color="#d81b60", lw=2.4, ls="-", alpha=.95, zorder=6,
+                    label="efficiency ridge" if sign == 1 else None)
 
     def _iso_power(self, ax, signed=False):
         """Constant-shaft-power curves, P = T * n * 2pi/60.
@@ -1026,6 +1046,7 @@ class ShiftOptimiserApp(ctk.CTk):
         ax.set_xlabel("Motor speed [rpm]")
         ax.set_ylabel("Motor torque [Nm]")
         self._iso_power(ax)
+        self._ridge(ax)
         return c
 
     def _draw_points(self, r, p, _kind):
@@ -1167,6 +1188,7 @@ class ShiftOptimiserApp(ctk.CTk):
         ax.set_ylim(tmin, tmax)
         ax.set_xlabel("Motor speed [rpm]")
         self._iso_power(ax, signed=True)
+        self._ridge(ax, signed=True)
         return c
 
     def _draw_shift(self, r, p, _kind):

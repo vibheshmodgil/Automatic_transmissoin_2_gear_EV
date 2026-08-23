@@ -117,6 +117,13 @@ Display controls apply to any view: filled shading, contour lines, colour bar, l
 counts, colormap, the negative-torque half, iso-power lines, and the **colour scale
 range**.
 
+**Efficiency ridge** draws the rpm that maximises efficiency *at each torque*. This is
+the curve a shift schedule should be judged against, and it is not the map's peak cell:
+that cell is only the optimum at its own torque. On the sample map the ridge runs from
+670 rpm at 2 Nm to 4260 rpm at 13 Nm. A cycle working the motor at 5 Nm wants 1710 rpm,
+not 4260 — sitting at 4260 rpm with 5 Nm costs 2.44 points against the ridge, and at
+2 Nm the same mistake costs 10.5 points.
+
 That last one matters more than it sounds. A motor map spans 0-95 % efficiency, but the
 whole result of this study lives between 89 % and 93 %. Spread the colormap over 0-100 %
 and everything above 80 % is the same yellow — a 3-point difference, which is the entire

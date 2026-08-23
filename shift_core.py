@@ -43,7 +43,7 @@ __all__ = [
     "sweep_downshift", "sweep_grid", "sweep_efficiency", "gear_breakdown",
     "wot_run", "wot_sweep", "tractive_force", "road_load_force",
     "oracle_bound", "shift_decomposition", "counterfactual_point",
-    "accel_capability", "energy_breakdown", "better_gear_per_sample",
+    "accel_capability", "energy_breakdown", "better_gear_per_sample", "efficiency_ridge",
 ]
 
 # numpy 1.x / 2.x compatible trapezoid rule (VMI pins numpy==1.26.4)
@@ -1054,6 +1054,30 @@ def energy_breakdown(res: ShiftResult, cycle: CycleData, veh: Vehicle = None,
     return dict(wheel=e_wheel, gearbox=e_shaft - e_wheel, motor=e_elec - e_shaft,
                 aux=e_aux, pack=e_batt - e_elec - e_aux, battery=e_batt,
                 efficiency=e_shaft / e_elec if e_elec > 0 else np.nan)
+
+
+def efficiency_ridge(emap: EfficiencyMap):
+    """For each torque, the speed that maximises efficiency. Returns (torque, rpm).
+
+    "The high-efficiency zone" is usually pictured as the map's single best cell,
+    but that cell is only the best point AT ITS OWN TORQUE. The rpm that maximises
+    efficiency moves a long way with load - on a typical map, from a few hundred rpm
+    at 2 Nm to several thousand at 13 Nm. A drive cycle that works the motor at 5 Nm
+    is not trying to reach the 13 Nm peak; it is trying to sit on the ridge at 5 Nm,
+    which is somewhere else entirely.
+
+    This is the curve a shift schedule should be judged against.
+    """
+    torque, rpm = [], []
+    for i in range(len(emap.torque)):
+        if emap.torque[i] <= 0:
+            continue
+        row = np.where(emap.missing[i], np.nan, emap.eff[i])
+        if not np.any(np.isfinite(row)):
+            continue
+        torque.append(emap.torque[i])
+        rpm.append(emap.rpm[int(np.nanargmax(row))])
+    return np.asarray(torque), np.asarray(rpm)
 
 
 def better_gear_per_sample(cycle: CycleData, emap: EfficiencyMap, veh: Vehicle = None,
