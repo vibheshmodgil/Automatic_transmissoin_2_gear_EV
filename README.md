@@ -56,7 +56,7 @@ print(result.net_kwh, result.wh_per_km, result.reserve_at_upshift)
 
 ## The analyses
 
-Eleven views, selected from the dropdown. Those marked ▸ need only the efficiency map,
+Thirteen views, selected from the dropdown. Those marked ▸ need only the efficiency map,
 not a drive cycle.
 
 **Single strategy** — one schedule over the full cycle. Stacked traces for road speed,
@@ -64,8 +64,13 @@ gear, motor rpm, motor torque, motor efficiency, battery power, shaft power,
 acceleration and cumulative energy — each one toggleable, with a time-window slider so
 you can read a 300 s slice instead of 28,000 samples squeezed into 900 pixels.
 
-**Points on map** — where the cycle actually sits on the efficiency map, per gear,
-motoring and braking. Tick **Colour points by gear choice** and every point is scored
+**Points on map** — where the cycle actually sits on the efficiency map, per gear.
+**Split the operating cloud by** offers four ways to read the same points, each answering
+a different question: *motoring / braking*; *right or wrong ratio*; *accelerating /
+cruising / braking* (the gear preference **inverts** between those regimes, which is the
+study's central finding); and *just shifted / settled*, separating the transient after a
+change from the steady operation the schedule actually buys. With *right or wrong ratio*
+every point is scored
 against the per-sample right answer: green where the engaged ratio really was the more
 efficient one, red where it was not. The summary reports the share of energy delivered
 through the better ratio — 71.8 % at the efficiency optimum against 36.0 % at a bad
@@ -110,6 +115,17 @@ asked for is always explained.
 ▸ **Acceleration run** — wide-open-throttle 0→V. The motor sits on its peak curve and
 the acceleration is an *output*, so the answer is a time. Swept over the upshift speed,
 with the tractive-force diagram that explains the result.
+
+**Energy bins** — the plane divided into (rpm × Nm) cells, each carrying the **energy**
+drawn, delivered and lost there. A scatter weights an idling sample the same as one
+pulling 25 Nm; this is the energy budget instead of a population count. Four panels:
+energy drawn per cell, where it is *wasted*, the **transition** between two schedules
+(which cells lost energy, which gained), and the efficiency achieved per cell.
+
+The transition summary is the direct answer to "did this schedule move the operating
+points somewhere better?" — on the sample data, going 22/10 → 32/22 moves 5.36 kWh
+(61.8 % of the total) **out of cells averaging 92.73 % into cells averaging 89.20 %**, and
+motor loss rises 643 → 857 Wh.
 
 ▸ **Efficiency map** — the map itself with the motor envelope and peak marked.
 

@@ -43,7 +43,7 @@ __all__ = [
     "sweep_downshift", "sweep_grid", "sweep_efficiency", "gear_breakdown",
     "wot_run", "wot_sweep", "tractive_force", "road_load_force",
     "oracle_bound", "shift_decomposition", "counterfactual_point",
-    "accel_capability", "energy_breakdown", "better_gear_per_sample", "efficiency_ridge",
+    "accel_capability", "energy_breakdown", "better_gear_per_sample", "efficiency_ridge", "energy_bins",
 ]
 
 # numpy 1.x / 2.x compatible trapezoid rule (VMI pins numpy==1.26.4)
@@ -1054,6 +1054,72 @@ def energy_breakdown(res: ShiftResult, cycle: CycleData, veh: Vehicle = None,
     return dict(wheel=e_wheel, gearbox=e_shaft - e_wheel, motor=e_elec - e_shaft,
                 aux=e_aux, pack=e_batt - e_elec - e_aux, battery=e_batt,
                 efficiency=e_shaft / e_elec if e_elec > 0 else np.nan)
+
+
+def energy_bins(res: ShiftResult, cycle: CycleData, veh: Vehicle = None,
+                motor: Motor = None, gb: Gearbox = None, num: Numerics = None,
+                rpm_step: float = 500.0, torque_step: float = 5.0,
+                rpm_max: float = 0.0, torque_max: float = 0.0) -> dict:
+    """Account the cycle's energy into (rpm, torque) bins.
+
+    A scatter of operating points says where the motor went; it says nothing about
+    how much of the cycle's energy went there. Ten thousand samples idling at 2 Nm
+    and two hundred samples pulling 25 Nm look comparable on a scatter plot and are
+    nothing alike in the energy budget. Binning fixes that: each cell carries
+
+        e_in    electrical energy drawn while operating in that cell
+        e_out   mechanical energy delivered from it
+        loss    e_in - e_out, i.e. what the motor threw away there
+        eff     e_out / e_in for the cell
+
+    Differencing two schedules' ``e_in`` grids then shows exactly which cells a
+    schedule moved energy OUT of and which it moved it INTO - which is the question
+    a shift study is really asking.
+
+    Motoring samples only; braking carries no traction energy.
+    """
+    veh = veh or Vehicle(); motor = motor or Motor(); gb = gb or Gearbox()
+    num = num or Numerics()
+    if res.gear is None:
+        raise ValueError("energy_bins needs a simulate(..., keep_arrays=True) result")
+
+    ratios = np.where(res.gear == 1, gb.ratio_1, gb.ratio_2)
+    etas = np.where(res.gear == 1, gb.eta_1, gb.eta_2)
+    t_w, n_w, p_w = road_load(cycle, veh, motor, gb, num, ratios)
+    use = ((np.abs(p_w) > num.power_epsilon) & (p_w > 0)
+           & np.isfinite(res.motor_eff) & (res.motor_eff > 0) & (res.motor_eff < 1.0))
+
+    # central-difference sample durations: they sum to the cycle duration exactly
+    t = cycle.time
+    dt = np.empty_like(t)
+    dt[1:-1] = (t[2:] - t[:-2]) / 2.0
+    dt[0] = (t[1] - t[0]) / 2.0
+    dt[-1] = (t[-1] - t[-2]) / 2.0
+
+    e_out_i = np.where(use, p_w / etas, 0.0) * dt / 3.6e6          # kWh at the shaft
+    e_in_i = np.where(use, p_w / (res.motor_eff * etas), 0.0) * dt / 3.6e6
+
+    # rpm_max / torque_max force a common grid, which is what makes two schedules
+    # differenceable - sized from each run's own extent they would not even align
+    n_hi = max(rpm_max or (float(np.max(np.abs(res.motor_rpm[use]))) if use.any() else 1.0),
+               rpm_step)
+    t_hi = max(torque_max or (float(np.max(np.abs(res.motor_torque[use]))) if use.any()
+                              else 1.0), torque_step)
+    rpm_edges = np.arange(0.0, n_hi + rpm_step, rpm_step)
+    trq_edges = np.arange(0.0, t_hi + torque_step, torque_step)
+
+    x = np.abs(res.motor_rpm)[use]
+    y = np.abs(res.motor_torque)[use]
+    e_in, _, _ = np.histogram2d(y, x, bins=[trq_edges, rpm_edges],
+                                weights=e_in_i[use])
+    e_out, _, _ = np.histogram2d(y, x, bins=[trq_edges, rpm_edges],
+                                 weights=e_out_i[use])
+    cnt, _, _ = np.histogram2d(y, x, bins=[trq_edges, rpm_edges])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        eff = np.where(e_in > 0, e_out / e_in, np.nan)
+    return dict(rpm_edges=rpm_edges, torque_edges=trq_edges,
+                e_in=e_in, e_out=e_out, loss=e_in - e_out, eff=eff, count=cnt,
+                total_in=float(e_in.sum()), total_out=float(e_out.sum()))
 
 
 def efficiency_ridge(emap: EfficiencyMap):

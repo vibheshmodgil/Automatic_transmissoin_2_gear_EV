@@ -56,6 +56,7 @@ ANALYSES = [
     "Downshift sweep",
     "Combined grid",
     "Efficiency-only optimum",   # ranked on motor efficiency alone, nothing else
+    "Energy bins",               # where the energy goes, and where a schedule moves it
     "Gradeability",
     "Acceleration run",       # one 0 -> V (-> 0) manoeuvre, swept over the shift speed
     "Efficiency map",
@@ -70,6 +71,7 @@ NEEDS = {                        # analysis -> required data keys
     "Downshift sweep": ("cycle", "map"),
     "Combined grid": ("cycle", "map"),
     "Efficiency-only optimum": ("cycle", "map"),
+    "Energy bins": ("cycle", "map"),
     "Gradeability": (),
     "Acceleration run": ("map",),
     "Efficiency map": ("map",),
@@ -112,6 +114,10 @@ FIELDS = [
     ("Sweep range", "Downshift to [km/h]", "dn_hi", "30", "sw"),
     ("Sweep range", "Step [km/h]", "step", "1", "sw"),
     ("Sweep range", "Minimum band [km/h]", "min_band", "2", "sw"),
+    ("Energy bins", "Bin size [rpm]", "bin_rpm", "500", "bin"),
+    ("Energy bins", "Bin size [Nm]", "bin_nm", "5", "bin"),
+    ("Energy bins", "Compare upshift [km/h]", "cmp_up", "32", "bin"),
+    ("Energy bins", "Compare downshift [km/h]", "cmp_dn", "22", "bin"),
     ("Acceleration run", "Target speed [km/h]", "v_target", "30", "run"),
     ("Acceleration run", "Throttle [0-1]", "throttle", "1.0", "run"),
     ("Numerics", "Smoothing window (0=off)", "smooth_window", "0", "num"),
@@ -136,6 +142,12 @@ CLOUD_G1 = "#10265e"      # deep blue
 CLOUD_G2 = "#a30f45"      # crimson
 ISO_POWER_KW = [0.25, 0.5, 1, 2, 3, 5, 8, 11]
 CMAPS = ["viridis", "plasma", "magma", "cividis", "turbo", "coolwarm", "Greys"]
+# how to split the operating cloud in "Points on map" - each answers a different
+# question about the same points
+POINT_MODES = ["motoring / braking",
+               "right or wrong ratio",
+               "accelerating / cruising / braking",
+               "just shifted / settled"]
 
 
 class ShiftOptimiserApp(ctk.CTk):
@@ -401,7 +413,10 @@ class ShiftOptimiserApp(ctk.CTk):
         self.disp["isopower"] = self._check(left, "Iso-power lines [kW]", False)
         self.disp["ridge"] = self._check(left, "Efficiency ridge (best rpm per torque)",
                                          False)
-        self.disp["bygear"] = self._check(left, "Colour points by gear choice", False)
+        ctk.CTkLabel(left, text="Split the operating cloud by",
+                     font=ctk.CTkFont(size=11), text_color=COLORS["text_muted"],
+                     anchor="w").pack(anchor="w", padx=6, pady=(8, 0))
+        self.disp["ptmode"] = self._menu(left, POINT_MODES, POINT_MODES[0])
         # Spread the whole colormap over the band the vehicle actually works in.
         # Across 0-100 % everything above ~80 % is the same yellow and a 3-point
         # efficiency difference - which is the entire result of this study - simply
@@ -680,6 +695,8 @@ class ShiftOptimiserApp(ctk.CTk):
             up_lo=self._f("sw", "up_lo", 8), up_hi=self._f("sw", "up_hi", 42),
             dn_lo=self._f("sw", "dn_lo", 4), dn_hi=self._f("sw", "dn_hi", 30),
             step=self._f("sw", "step", 1), min_band=self._f("sw", "min_band", 2),
+            bin_rpm=self._f("bin", "bin_rpm", 500), bin_nm=self._f("bin", "bin_nm", 5),
+            cmp_up=self._f("bin", "cmp_up", 32), cmp_dn=self._f("bin", "cmp_dn", 22),
             v_target=self._f("run", "v_target", 30),
             throttle=self._f("run", "throttle", 1.0),
         )
@@ -716,6 +733,24 @@ class ShiftOptimiserApp(ctk.CTk):
                                           I["dn_lo"], I["dn_hi"], max(I["step"], 1.0),
                                           min_band=I["min_band"],
                                           **{**p, "cost": free})
+            elif kind == "Energy bins":
+                kw = dict(veh=p["veh"], motor=p["motor"], gb=p["gb"], num=p["num"],
+                          rpm_step=max(50.0, I["bin_rpm"]),
+                          torque_step=max(0.5, I["bin_nm"]))
+                runs, bins = {}, {}
+                for tag, u, d in (("A", I["upshift"], I["downshift"]),
+                                  ("B", I["cmp_up"], I["cmp_dn"])):
+                    runs[tag] = sc.simulate(self.cycle, self.emap, u, d,
+                                            keep_arrays=True, **p)
+                ok_runs = [x for x in runs.values() if x.gear is not None]
+                kw["rpm_max"] = max((float(np.nanmax(np.abs(x.motor_rpm)))
+                                     for x in ok_runs), default=0.0)
+                kw["torque_max"] = max((float(np.nanmax(np.abs(x.motor_torque)))
+                                        for x in ok_runs), default=0.0)
+                for tag, rr in runs.items():
+                    bins[tag] = sc.energy_bins(rr, self.cycle, **kw) \
+                        if rr.gear is not None else None
+                out = (runs, bins)
             elif kind == "Gradeability":
                 out = sc.gradeability_table(veh=p["veh"], motor=p["motor"], gb=p["gb"])
             elif kind in ("Points on map", "Shift movement"):
@@ -765,6 +800,7 @@ class ShiftOptimiserApp(ctk.CTk):
         "Downshift sweep": "_draw_downshift",
         "Combined grid": "_draw_combined",
         "Efficiency-only optimum": "_draw_effopt",
+        "Energy bins": "_draw_bins",
         "Gradeability": "_draw_gradeability",
         "Acceleration run": "_draw_acceleration",
         "Efficiency map": "_draw_efficiency",
@@ -1056,13 +1092,8 @@ class ShiftOptimiserApp(ctk.CTk):
                           ha="center", va="center", color=COLORS["danger"])
             self.log("INFEASIBLE\n" + "\n".join("  - " + x for x in r.reasons)); return
         signed = self.disp["negative"].get()
-        by_choice = self.disp["bygear"].get()
         em = self.emap
         act = np.abs(r.motor_torque) > 1e-9
-        if by_choice:
-            better, valid = sc.better_gear_per_sample(
-                self.cycle, self.emap, veh=p["veh"], motor=p["motor"], gb=p["gb"],
-                num=p["num"])
         ax = self.fig.subplots(1, 2, sharex=True, sharey=True)
         if signed:
             lim = min(em.torque.max(), p["motor"].peak_torque)
@@ -1071,15 +1102,7 @@ class ShiftOptimiserApp(ctk.CTk):
         for a, gear, col, mk in ((ax[0], 1, "#ffffff", "o"), (ax[1], 2, "#ffd400", "^")):
             c = (self._signed_background(a, p, tlo, thi, alpha=.8) if signed
                  else self._map_background(a, p, alpha=.8))
-            base = act & (r.gear == gear)
-            if by_choice:
-                pull = base & (r.motor_torque > 0) & valid
-                groups = [(pull & (better == gear), "RIGHT ratio", .6, "#1a7f4b", mk),
-                          (pull & (better != gear), "wrong ratio", .6, "#c62828", mk)]
-            else:
-                groups = [(base & (r.motor_torque > 0), "motoring", .55, col, mk)]
-                if signed:
-                    groups.append((base & (r.motor_torque < 0), "braking", .5, "none", mk))
+            groups = self._point_groups(r, p, gear, act, signed, col, mk)
             for m, lab, alpha, face, marker in groups:
                 idx = np.flatnonzero(m)
                 if not len(idx):
@@ -1114,6 +1137,7 @@ class ShiftOptimiserApp(ctk.CTk):
               "  Both clouds hug the bottom of the plane. The star is the map's best point;",
               "  the cycle never gets near it because the demand is a 1-2 kW load and that",
               "  point is a 5.8 kW operating condition."]
+        L += ["", f"  Split shown: {self.disp['ptmode'].get()}."]
         if signed:
             L += ["",
                   "  The braking half (negative torque) is drawn from the map MIRRORED about",
@@ -1123,6 +1147,51 @@ class ShiftOptimiserApp(ctk.CTk):
         self.log("\n".join(L))
         self.say("Operating cloud plotted" + (" with the braking half" if signed else ""),
                  "ok")
+
+    def _point_groups(self, r, p, gear, act, signed, col, mk):
+        """Split one gear's operating points into the groups the chosen mode implies.
+
+        Returns [(mask, label, alpha, facecolour, marker), ...]. Each mode answers a
+        different question about the same cloud:
+
+          motoring / braking      is the motor pulling or being driven
+          right or wrong ratio    was this the more efficient ratio at that instant
+          accel / cruise / brake  which regime - and the gear preference INVERTS
+                                  between them, which is the study's central finding
+          just shifted / settled  is this a transient right after a change, or the
+                                  steady operation the schedule actually buys
+        """
+        mode = self.disp["ptmode"].get()
+        base = act & (r.gear == gear)
+        pull = base & (r.motor_torque > 0)
+
+        if mode == POINT_MODES[1]:                       # right or wrong ratio
+            better, valid = sc.better_gear_per_sample(
+                self.cycle, self.emap, veh=p["veh"], motor=p["motor"], gb=p["gb"],
+                num=p["num"])
+            ok = pull & valid
+            return [(ok & (better == gear), "RIGHT ratio", .6, "#1a7f4b", mk),
+                    (ok & (better != gear), "wrong ratio", .6, "#c62828", mk)]
+
+        if mode == POINT_MODES[2]:                       # regime
+            a = np.gradient(self.cycle.speed_kmh / 3.6, self.cycle.time)
+            return [(pull & (a > .15), "accelerating", .6, "#c62828", mk),
+                    (pull & (np.abs(a) <= .15), "cruising", .6, "#1a7f4b", mk),
+                    (base & (r.motor_torque < 0), "braking", .5, "#2b5fa8", mk)]
+
+        if mode == POINT_MODES[3]:                       # transient or settled
+            sh = np.flatnonzero(np.diff(r.gear) != 0)
+            fresh = np.zeros(len(r.gear), dtype=bool)
+            for off in range(0, 6):                      # ~5 s after a change
+                k = sh + off
+                fresh[k[k < len(fresh)]] = True
+            return [(pull & fresh, "just shifted (<5 s)", .75, "#c62828", mk),
+                    (pull & ~fresh, "settled in gear", .5, "#1a7f4b", mk)]
+
+        groups = [(pull, "motoring", .55, col, mk)]      # default
+        if signed:
+            groups.append((base & (r.motor_torque < 0), "braking", .5, "none", mk))
+        return groups
 
     def _choice_score(self, r, p):
         """How often this schedule engaged the ratio that was actually better.
@@ -1786,6 +1855,164 @@ class ShiftOptimiserApp(ctk.CTk):
               f"  CONVERGED : {sw.converged}"]
         if sw.boundary_note:
             L.append("  NOTE      : " + sw.boundary_note)
+        return NL.join(L)
+
+    # ------------------------------------------------- energy bins
+    def _draw_bins(self, payload, p, _kind):
+        """Where the cycle's energy goes, and where a schedule moves it.
+
+        A scatter of operating points weights a sample idling at 2 Nm the same as one
+        pulling 25 Nm. Binning the plane and accumulating ENERGY fixes that, and the
+        difference between two schedules' grids answers the question directly: which
+        cells did this schedule take energy out of, and which did it put it into?
+        """
+        runs, bins = payload
+        if bins["A"] is None:
+            self.fig.text(.5, .5, "Strategy A is infeasible\n\n"
+                          + "\n".join(runs["A"].reasons), ha="center", va="center",
+                          color=COLORS["danger"])
+            self.log("A infeasible: " + "; ".join(runs["A"].reasons)); return
+
+        A, B = bins["A"], bins["B"]
+        rA, rB = runs["A"], runs["B"]
+        gs = self.fig.add_gridspec(2, 2, hspace=.32, wspace=.24)
+        axes = [self.fig.add_subplot(gs[i, j]) for i in (0, 1) for j in (0, 1)]
+        X, Y = A["rpm_edges"], A["torque_edges"]
+
+        def frame(ax):
+            """Efficiency contours behind the bins, so a cell can be read in context."""
+            em = self.emap
+            st = self._map_style()
+            R, T = np.meshgrid(em.rpm, em.torque)
+            Z = np.where(em.missing, np.nan, em.eff) * 100
+            if st["fill"] > 0:
+                ax.contourf(R, T, Z, levels=np.linspace(st["lo"], st["hi"], st["fill"] + 1),
+                            cmap="Greys_r", alpha=.30, extend="both", zorder=0)
+            n = np.linspace(1, p["motor"].max_rpm, 400)
+            ax.plot(n, p["motor"].envelope(n), color=COLORS["danger"], lw=1.8, zorder=6)
+            try:
+                t_r, n_r = sc.efficiency_ridge(em)
+                ax.plot(n_r, t_r, color="#d81b60", lw=2, zorder=6)
+            except Exception:
+                pass
+            ax.set_xlim(0, X[-1]); ax.set_ylim(0, Y[-1])
+            ax.set_xlabel("Motor speed [rpm]"); ax.set_ylabel("Motor torque [Nm]")
+
+        # --- 1. energy drawn, schedule A -------------------------------------
+        frame(axes[0])
+        m0 = axes[0].pcolormesh(X, Y, np.where(A["e_in"] > 0, A["e_in"], np.nan),
+                                cmap="viridis", shading="flat", zorder=2)
+        self._colorbar(m0, axes[0], "Energy drawn [kWh]")
+        axes[0].set_title(f"A: energy drawn per bin   {rA.upshift:g}/{rA.downshift:g}"
+                          f"   ({A['total_in']:.3f} kWh)",
+                          fontweight="bold", fontsize=10)
+
+        # --- 2. loss, schedule A ---------------------------------------------
+        frame(axes[1])
+        m1 = axes[1].pcolormesh(X, Y, np.where(A["loss"] > 0, A["loss"] * 1000, np.nan),
+                                cmap="inferno", shading="flat", zorder=2)
+        self._colorbar(m1, axes[1], "Motor loss [Wh]")
+        axes[1].set_title(f"A: where the energy is WASTED   "
+                          f"({1000*A['loss'].sum():.0f} Wh total)",
+                          fontweight="bold", fontsize=10)
+
+        # --- 3. the transition -----------------------------------------------
+        frame(axes[2])
+        if B is not None:
+            d = B["e_in"] - A["e_in"]
+            lim = float(np.nanmax(np.abs(d))) or 1.0
+            m2 = axes[2].pcolormesh(X, Y, np.where(np.abs(d) > 1e-9, d * 1000, np.nan),
+                                    cmap="RdBu_r", shading="flat", vmin=-1000 * lim,
+                                    vmax=1000 * lim, zorder=2)
+            self._colorbar(m2, axes[2], "Energy moved [Wh]   red = into B")
+            axes[2].set_title(f"Transition   {rA.upshift:g}/{rA.downshift:g} "
+                              f"-> {rB.upshift:g}/{rB.downshift:g}",
+                              fontweight="bold", fontsize=10)
+        else:
+            axes[2].set_title("Comparison schedule infeasible", fontweight="bold",
+                              fontsize=10)
+
+        # --- 4. efficiency of each bin ---------------------------------------
+        frame(axes[3])
+        m3 = axes[3].pcolormesh(X, Y, A["eff"] * 100, cmap="viridis", shading="flat",
+                                zorder=2, vmin=self._map_style()["lo"],
+                                vmax=self._map_style()["hi"])
+        self._colorbar(m3, axes[3], "Bin efficiency [%]")
+        axes[3].set_title("A: efficiency achieved in each bin", fontweight="bold",
+                          fontsize=10)
+
+        self.fig.suptitle(f"Energy accounted into "
+                          f"{A['rpm_edges'][1]-A['rpm_edges'][0]:.0f} rpm x "
+                          f"{A['torque_edges'][1]-A['torque_edges'][0]:.0f} Nm bins",
+                          fontweight="bold")
+        self.log(self._bins_summary(A, B, rA, rB))
+        self.say(f"{A['total_in']:.3f} kWh binned; "
+                 f"{1000*A['loss'].sum():.0f} Wh lost in the motor", "ok")
+
+    @staticmethod
+    def _bins_summary(A, B, rA, rB):
+        NL = chr(10)
+        X, Y = A["rpm_edges"], A["torque_edges"]
+
+        def cell(i, j):
+            return (f"{X[j]:.0f}-{X[j+1]:.0f} rpm, {Y[i]:.0f}-{Y[i+1]:.0f} Nm")
+
+        L = [f"Energy bins - schedule A = {rA.upshift:g}/{rA.downshift:g} km/h",
+             "=" * 74, "",
+             f"  {A['total_in']:.4f} kWh drawn, {A['total_out']:.4f} kWh delivered,",
+             f"  {1000*A['loss'].sum():.1f} Wh lost in the motor "
+             f"({100*A['loss'].sum()/A['total_in']:.2f} % of what was drawn)", ""]
+
+        order = np.argsort(A["e_in"].ravel())[::-1]
+        L += ["  BIGGEST ENERGY CELLS", "  " + "-" * 60,
+              f"  {'cell':<28}{'drawn':>9}{'loss':>9}{'eff':>9}{'share':>8}"]
+        for k in order[:8]:
+            i, j = np.unravel_index(k, A["e_in"].shape)
+            if A["e_in"][i, j] <= 0:
+                break
+            L.append(f"  {cell(i,j):<28}{A['e_in'][i,j]:8.4f} "
+                     f"{1000*A['loss'][i,j]:7.1f} Wh{A['eff'][i,j]:8.2%}"
+                     f"{100*A['e_in'][i,j]/A['total_in']:7.1f} %")
+
+        order_l = np.argsort(A["loss"].ravel())[::-1]
+        L += ["", "  BIGGEST LOSS CELLS - where the money actually goes",
+              "  " + "-" * 60,
+              f"  {'cell':<28}{'loss':>10}{'eff':>9}{'share of loss':>15}"]
+        for k in order_l[:6]:
+            i, j = np.unravel_index(k, A["loss"].shape)
+            if A["loss"][i, j] <= 0:
+                break
+            L.append(f"  {cell(i,j):<28}{1000*A['loss'][i,j]:9.1f} Wh"
+                     f"{A['eff'][i,j]:8.2%}{100*A['loss'][i,j]/A['loss'].sum():14.1f} %")
+
+        if B is not None:
+            d = B["e_in"] - A["e_in"]
+            out_m, in_m = d < -1e-9, d > 1e-9
+            moved = float(-d[out_m].sum())
+            # efficiency of the cells energy left, and of the cells it arrived in
+            eff_from = (np.nansum(-d[out_m] * A["eff"][out_m]) / moved) if moved > 0 else np.nan
+            gained = float(d[in_m].sum())
+            eff_to = (np.nansum(d[in_m] * B["eff"][in_m]) / gained) if gained > 0 else np.nan
+            L += ["", f"  TRANSITION  {rA.upshift:g}/{rA.downshift:g} -> "
+                      f"{rB.upshift:g}/{rB.downshift:g}", "  " + "-" * 60,
+                  f"    energy moved out of cells averaging {eff_from:.2%}",
+                  f"    into cells averaging               {eff_to:.2%}",
+                  f"    amount moved  {moved:.4f} kWh "
+                  f"({100*moved/A['total_in']:.1f} % of the total)",
+                  f"    net effect    motor loss {1000*A['loss'].sum():.1f} Wh -> "
+                  f"{1000*B['loss'].sum():.1f} Wh "
+                  f"({1000*(B['loss'].sum()-A['loss'].sum()):+.1f} Wh)"]
+            if np.isfinite(eff_from) and np.isfinite(eff_to):
+                L.append("    -> " + ("B moves energy into BETTER cells"
+                                      if eff_to > eff_from else
+                                      "B moves energy into WORSE cells"))
+            L += ["", "    Read the transition panel with this: red cells gained energy",
+                  "    under B, blue cells lost it. Compare each against the ridge drawn",
+                  "    on the same axes - a schedule earns its keep by moving energy",
+                  "    toward the ridge, not toward the map's single peak."]
+        L += ["", "  Why bins and not a scatter: a scatter weights an idling sample the",
+              "  same as one pulling 25 Nm. These cells carry ENERGY, so the picture is",
+              "  the energy budget rather than a population count."]
         return NL.join(L)
 
     def _draw_gradeability(self, df, p, _kind):
