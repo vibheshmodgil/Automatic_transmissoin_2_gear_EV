@@ -90,7 +90,13 @@ with the tractive-force diagram that explains the result.
 ▸ **Efficiency map** — the map itself with the motor envelope and peak marked.
 
 Display controls apply to any view: filled shading, contour lines, colour bar, level
-counts, colormap, the negative-torque half, and a plot-height slider.
+counts, colormap, and the negative-torque half.
+
+**Resizing.** Both panel boundaries are draggable — grab the edge between the parameter
+column and the plot, or between the plot and the results panel, and the figure refits
+when you let go. The *Plot height* slider does a different job: it makes the figure
+**taller than the panel** so it scrolls, which is what you want with eight or nine signal
+traces stacked up. `Auto` returns it to fitting the panel exactly.
 
 ---
 

@@ -664,7 +664,17 @@ just the envelope and the operating points — intended, for overlay-only views.
 
 Layout note: `_render()` now sets `fig.set_layout_engine("tight")` instead of calling
 `fig.tight_layout()` once, because the scrollable host resizes the figure *after* the draw
-call and a one-shot layout would be stale.
+call and a one-shot layout would be stale. It falls back to `tight_layout()` where
+`set_layout_engine` is missing (matplotlib < 3.6).
+
+**Panel sizing.** Both boundaries are `tk.PanedWindow` sashes - parameters | plot, and
+plot | results. CTk widgets that build their own container (`CTkScrollableFrame`,
+`CTkTextbox`) cannot be added to a `PanedWindow` directly, because the object you hold is
+a grandchild of the master rather than a child; each pane therefore holds a plain
+`CTkFrame` with the real widget packed inside it. `_on_sash_moved` refits the figure on
+release. The canvas height itself tracks the live viewport (`_viewport_h`) and only
+exceeds it when a stacked signal view needs the room - forcing a fixed minimum taller than
+the viewport is what made the plot area read as blank on smaller screens.
 
 ## 7h. Why the downshift intuition never resolves — the ceiling
 

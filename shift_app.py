@@ -20,6 +20,7 @@ import queue
 import threading
 import traceback
 from pathlib import Path
+import tkinter as tk
 from tkinter import filedialog
 
 import customtkinter as ctk
@@ -212,13 +213,25 @@ class ShiftOptimiserApp(ctk.CTk):
         body = ctk.CTkFrame(self, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=16, pady=12)
 
-        left = ctk.CTkScrollableFrame(body, width=330, fg_color=COLORS["card"],
-                                      corner_radius=14, border_width=1,
-                                      border_color=COLORS["border"],
+        # Draggable splitters. tk.PanedWindow gives a real sash with the resize
+        # cursor on hover, which is what you reach for at a panel edge; the plot
+        # height slider stays because it does a different job - making the figure
+        # TALLER than the panel so it scrolls.
+        self.split_h = tk.PanedWindow(
+            body, orient="horizontal", bg=COLORS["border"], sashwidth=7,
+            sashrelief="flat", borderwidth=0, showhandle=False, opaqueresize=False)
+        self.split_h.pack(fill="both", expand=True)
+
+        left_pane = ctk.CTkFrame(self.split_h, width=330, fg_color=COLORS["card"],
+                                 corner_radius=14, border_width=1,
+                                 border_color=COLORS["border"])
+        self.split_h.add(left_pane, minsize=210, stretch="never", padx=0, pady=0)
+        left = ctk.CTkScrollableFrame(left_pane, fg_color=COLORS["card"],
+                                      corner_radius=12, border_width=0,
                                       label_text="Parameters",
                                       label_font=ctk.CTkFont(size=13, weight="bold"),
                                       label_text_color=COLORS["primary"])
-        left.pack(side="left", fill="y", padx=(0, 14))
+        left.pack(fill="both", expand=True, padx=2, pady=2)
 
         section = None
         for sec, label, attr, default, kind in FIELDS:
@@ -239,9 +252,14 @@ class ShiftOptimiserApp(ctk.CTk):
 
         self._build_display(left)
 
-        right = ctk.CTkFrame(body, fg_color=COLORS["card"], corner_radius=14,
+        self.split_v = tk.PanedWindow(
+            self.split_h, orient="vertical", bg=COLORS["border"], sashwidth=7,
+            sashrelief="flat", borderwidth=0, showhandle=False, opaqueresize=False)
+        self.split_h.add(self.split_v, minsize=380, stretch="always", padx=0, pady=0)
+
+        right = ctk.CTkFrame(self.split_v, fg_color=COLORS["card"], corner_radius=14,
                              border_width=1, border_color=COLORS["border"])
-        right.pack(side="left", fill="both", expand=True)
+        self.split_v.add(right, minsize=180, stretch="always", padx=0, pady=0)
 
         # The plot normally lives in a scrollable host so a tall stack of signal
         # panels can be scrolled rather than squeezed flat. On some machines -
@@ -292,10 +310,19 @@ class ShiftOptimiserApp(ctk.CTk):
                               "than the window", font=ctk.CTkFont(size=10),
                      text_color=COLORS["text_muted"]).pack(side="left")
 
-        self.results = ctk.CTkTextbox(right, height=176, fg_color=COLORS["section_bg"],
+        res_pane = ctk.CTkFrame(self.split_v, height=176, fg_color="transparent")
+        self.split_v.add(res_pane, minsize=64, stretch="never", padx=0, pady=0)
+        self.results = ctk.CTkTextbox(res_pane, fg_color=COLORS["section_bg"],
                                       border_color=COLORS["border"], border_width=1,
                                       font=ctk.CTkFont(family="Consolas", size=11))
-        self.results.pack(fill="x", padx=10, pady=10)
+        self.results.pack(fill="both", expand=True, pady=(8, 0))
+
+        # a sash move changes the viewport, so the figure has to be refitted
+        for pane in (self.split_h, self.split_v):
+            pane.bind("<ButtonRelease-1>", self._on_sash_moved)
+        # PanedWindow picks its own first split from the requested sizes, which comes
+        # out narrower than the parameter rows need; set it once, then leave it alone
+        self.after(150, self._place_initial_sashes)
         self._welcome()
 
     # --------------------------------------------------------- display panel
@@ -678,6 +705,24 @@ class ShiftOptimiserApp(ctk.CTk):
         want = 155 * len(self.fig.axes) if kind == "Single strategy" else 0
         self.canvas.get_tk_widget().configure(height=max(want, self._viewport_h()))
         self._warn_if_invisible()
+
+    def _place_initial_sashes(self):
+        """One-off: open at a width that fits the parameter rows without clipping."""
+        try:
+            self.split_h.sash_place(0, 348, 0)
+            h = self.split_v.winfo_height()
+            if h > 300:
+                self.split_v.sash_place(0, 0, h - 186)
+            self._on_sash_moved()
+        except Exception:
+            pass
+
+    def _on_sash_moved(self, _event=None):
+        """Refit the figure to the panel after a splitter drag."""
+        if self._last_render is None:
+            return
+        self.after_idle(lambda: (self._fit_canvas(self._last_render[0]),
+                                 self.canvas.draw_idle()))
 
     def _viewport_h(self) -> int:
         """Visible height of the scroll area, in pixels, with a sane fallback."""
