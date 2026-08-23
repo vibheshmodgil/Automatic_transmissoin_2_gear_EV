@@ -876,9 +876,22 @@ class ShiftOptimiserApp(ctk.CTk):
             ax.axvline(v, color=COLORS["danger"], ls=":", lw=1.2, alpha=.7)
         ax.text(lo, ax.get_ylim()[1], " search bound", color=COLORS["danger"],
                 fontsize=8, va="top")
-        ax.set_xlabel(xlabel); ax.set_ylabel("Consumed energy [kWh]")
+        # The efficiency curve is the whole point and used to be invisible here: the
+        # energy axis alone cannot tell you whether a candidate won by moving the
+        # operating points somewhere better or by some other term.
+        if "mean_efficiency" in df.columns and len(ok):
+            ax2 = ax.twinx()
+            ax2.plot(ok[col], ok["mean_efficiency"] * 100, "s--", ms=3, alpha=.85,
+                     color=COLORS["warning"], label="mean motor efficiency")
+            ax2.set_ylabel("Mean motor efficiency [%]", color=COLORS["warning"])
+            ax2.tick_params(axis="y", labelcolor=COLORS["warning"])
+            if sw.best is not None:
+                ax2.scatter([getattr(sw.best, col)], [sw.best.mean_efficiency * 100],
+                            s=70, zorder=6, facecolor=COLORS["warning"],
+                            edgecolor="k", lw=1)
+        ax.set_xlabel(xlabel); ax.set_ylabel("Net energy [kWh]")
         ax.grid(alpha=.3)
-        ax.legend(fontsize=9)
+        ax.legend(fontsize=9, loc="upper left")
         title = kind + ("" if sw.converged else "  —  NOT CONVERGED")
         ax.set_title(title, fontweight="bold",
                      color=COLORS["text"] if sw.converged else COLORS["danger"])
@@ -1575,8 +1588,62 @@ class ShiftOptimiserApp(ctk.CTk):
             L += ["", "  Why candidates were rejected:"]
             for why, n in rej["reasons"].value_counts().head(5).items():
                 L.append(f"    {n:>4} x  {why if why else '(band constraint)'}")
+        L += self._where_it_wins(sw, col)
         L += self._ceiling(sw)
         return "\n".join(L)
+
+    def _where_it_wins(self, sw, col):
+        """Split the best-vs-worst difference into physical terms.
+
+        Without this the sweep says only that two schedules differ by N Wh. This
+        says whether the optimum earned it by putting the motor somewhere more
+        efficient, or by some unrelated term.
+        """
+        if sw.best is None or self.cycle is None:
+            return []
+        ok = sw.table[sw.table["feasible"]]
+        if len(ok) < 2:
+            return []
+        try:
+            p = self.params()
+            worst_val = ok.loc[ok["net_kwh"].idxmax()]
+            runs = {}
+            for tag, up, dn in (("best", sw.best.upshift, sw.best.downshift),
+                                ("worst", worst_val["upshift"], worst_val["downshift"])):
+                r = sc.simulate(self.cycle, self.emap, up, dn, keep_arrays=True, **p)
+                runs[tag] = (r, sc.energy_breakdown(r, self.cycle, veh=p["veh"],
+                                                    motor=p["motor"], gb=p["gb"],
+                                                    elec=p["elec"], num=p["num"]))
+        except Exception:
+            return []
+
+        (rb, bb), (rw, bw) = runs["best"], runs["worst"]
+        total = 1000 * (rw.net_kwh - rb.net_kwh)
+        if abs(total) < 1e-9:
+            return []
+        L = ["", "  WHAT THE OPTIMUM ACTUALLY WINS ON", "  " + "-" * 56,
+             f"    best {rb.upshift:g}/{rb.downshift:g} vs worst "
+             f"{rw.upshift:g}/{rw.downshift:g}  ->  {total:.1f} Wh apart", "",
+             f"    {'term':<26}{'best':>10}{'worst':>10}{'diff':>11}"]
+        for key, label in (("wheel", "demanded at the wheel"),
+                           ("gearbox", "gearbox loss"),
+                           ("motor", "MOTOR loss (efficiency)"),
+                           ("aux", "auxiliary load"),
+                           ("pack", "pack I2R")):
+            d = 1000 * (bw[key] - bb[key])
+            L.append(f"    {label:<26}{bb[key]:10.4f}{bw[key]:10.4f}{d:+10.1f} Wh")
+        L += [f"    {'mean motor efficiency':<26}{bb['efficiency']:9.2%}"
+              f"{bw['efficiency']:10.2%}"
+              f"{100*(bb['efficiency']-bw['efficiency']):+9.2f} pts",
+              "",
+              f"    -> {100*1000*(bw['motor']-bb['motor'])/total:.0f} % of the gain is "
+              f"lower motor loss, i.e. the operating",
+              "       points genuinely moved into a better part of the map.",
+              "       That gain is spread over every loaded sample, which is why it is",
+              "       not visible in 'Shift movement' - that view draws only the "
+              f"{rb.upshifts + rb.downshifts} shift",
+              "       events. Use 'Points on map' to see the cloud move."]
+        return L
 
     def _ceiling(self, sw):
         """How much any schedule could ever win - the answer the sweep cannot give.

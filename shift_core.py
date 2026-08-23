@@ -43,7 +43,7 @@ __all__ = [
     "sweep_downshift", "sweep_grid", "gear_breakdown",
     "wot_run", "wot_sweep", "tractive_force", "road_load_force",
     "oracle_bound", "shift_decomposition", "counterfactual_point",
-    "accel_capability",
+    "accel_capability", "energy_breakdown",
 ]
 
 # numpy 1.x / 2.x compatible trapezoid rule (VMI pins numpy==1.26.4)
@@ -1015,6 +1015,45 @@ def _both_gears(cycle, emap, veh, motor, gb, num):
         out[gear] = dict(t_wheel=t_w, p_wheel=p_w, rpm=n_m, torque=t_m,
                          eff=eff, active=act, eta=eta)
     return out
+
+
+def energy_breakdown(res: ShiftResult, cycle: CycleData, veh: Vehicle = None,
+                     motor: Motor = None, gb: Gearbox = None,
+                     elec: Electrical = None, num: Numerics = None) -> dict:
+    """Where the battery energy actually goes, in kWh.
+
+        wheel  -> the work the road demands
+        gearbox-> mesh loss
+        motor  -> the efficiency term: what the map costs you
+        aux    -> constant hotel load
+        pack   -> I^2R in the battery
+
+    This is the question a sweep cannot answer on its own: two schedules differ by
+    some number of Wh, but until the difference is split into these terms you cannot
+    say whether the optimum won on EFFICIENCY (the operating points moved somewhere
+    better) or on something else entirely, like the reflected inertia of the ratio it
+    happened to spend more time in.
+    """
+    veh = veh or Vehicle(); motor = motor or Motor(); gb = gb or Gearbox()
+    elec = elec or Electrical(); num = num or Numerics()
+    if res.gear is None:
+        raise ValueError("energy_breakdown needs a simulate(..., keep_arrays=True) result")
+
+    ratios = np.where(res.gear == 1, gb.ratio_1, gb.ratio_2)
+    etas = np.where(res.gear == 1, gb.eta_1, gb.eta_2)
+    t_w, n_w, p_w = road_load(cycle, veh, motor, gb, num, ratios)
+    use = ((np.abs(p_w) > num.power_epsilon) & (p_w > 0)
+           & np.isfinite(res.motor_eff) & (res.motor_eff < 1.0) & (res.motor_eff > 0))
+
+    e_wheel = _trapz(np.where(use, p_w, 0.0), cycle.time) / 3.6e6
+    e_shaft = _trapz(np.where(use, p_w / etas, 0.0), cycle.time) / 3.6e6
+    e_elec = _trapz(np.where(use, p_w / (res.motor_eff * etas), 0.0), cycle.time) / 3.6e6
+    e_aux = elec.aux_load * cycle.duration / 3.6e6
+    e_batt = _trapz(np.maximum(np.nan_to_num(res.battery_power), 0.0),
+                    cycle.time) / 3.6e6
+    return dict(wheel=e_wheel, gearbox=e_shaft - e_wheel, motor=e_elec - e_shaft,
+                aux=e_aux, pack=e_batt - e_elec - e_aux, battery=e_batt,
+                efficiency=e_shaft / e_elec if e_elec > 0 else np.nan)
 
 
 def oracle_bound(cycle: CycleData, emap: EfficiencyMap, veh: Vehicle = None,
