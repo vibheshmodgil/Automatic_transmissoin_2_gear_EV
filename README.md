@@ -103,7 +103,14 @@ with the tractive-force diagram that explains the result.
 ▸ **Efficiency map** — the map itself with the motor envelope and peak marked.
 
 Display controls apply to any view: filled shading, contour lines, colour bar, level
-counts, colormap, and the negative-torque half.
+counts, colormap, the negative-torque half, iso-power lines, and the **colour scale
+range**.
+
+That last one matters more than it sounds. A motor map spans 0-95 % efficiency, but the
+whole result of this study lives between 89 % and 93 %. Spread the colormap over 0-100 %
+and everything above 80 % is the same yellow — a 3-point difference, which is the entire
+finding, is invisible. The scale defaults to 78-95 % so the working band is resolved; open
+it to 0-100 % when you want to see the stall region instead.
 
 **Resizing.** Both panel boundaries are draggable — grab the edge between the parameter
 column and the plot, or between the plot and the results panel, and the figure refits

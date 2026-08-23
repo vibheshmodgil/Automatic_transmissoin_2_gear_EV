@@ -131,6 +131,10 @@ SIGNALS = [
     ("energy", "Cumulative energy",  False),
 ]
 WINDOWS = ["full cycle", "3600 s", "1800 s", "600 s", "300 s", "120 s", "60 s"]
+# operating-cloud colours: dark, because the cycle sits on the bright end of viridis
+CLOUD_G1 = "#10265e"      # deep blue
+CLOUD_G2 = "#a30f45"      # crimson
+ISO_POWER_KW = [0.25, 0.5, 1, 2, 3, 5, 8, 11]
 CMAPS = ["viridis", "plasma", "magma", "cividis", "turbo", "coolwarm", "Greys"]
 
 
@@ -394,6 +398,13 @@ class ShiftOptimiserApp(ctk.CTk):
         self.disp["clabels"] = self._check(left, "Label contour lines", False)
         self.disp["envelope"] = self._check(left, "Envelope + peak marker", True)
         self.disp["negative"] = self._check(left, "Negative-torque (braking) half", True)
+        self.disp["isopower"] = self._check(left, "Iso-power lines [kW]", False)
+        # Spread the whole colormap over the band the vehicle actually works in.
+        # Across 0-100 % everything above ~80 % is the same yellow and a 3-point
+        # efficiency difference - which is the entire result of this study - simply
+        # cannot be seen.
+        self.disp["eff_lo"] = self._slider(left, "Colour scale from", 0, 92, 78, " %")
+        self.disp["eff_hi"] = self._slider(left, "Colour scale to", 80, 100, 95, " %")
 
         self._sec(left, "SHIFT-MOVEMENT LAYERS")
         self.disp["lay_g1"] = self._check(left, "All gear 1 points", True)
@@ -437,12 +448,42 @@ class ShiftOptimiserApp(ctk.CTk):
         return lo, lo + span
 
     def _map_style(self):
-        return dict(cbar=self.disp["cbar"].get(),
+        lo = float(self.disp["eff_lo"].get())
+        hi = float(self.disp["eff_hi"].get())
+        if hi <= lo + 1:
+            hi = lo + 1
+        return dict(lo=lo, hi=hi,
+                    cbar=self.disp["cbar"].get(),
                     fill=int(self.disp["fill_levels"].get()) if self.disp["fill_on"].get() else 0,
                     lines=int(self.disp["line_levels"].get()) if self.disp["lines_on"].get() else 0,
                     labels=self.disp["clabels"].get(),
                     envelope=self.disp["envelope"].get(),
                     cmap=self.disp["cmap"].get())
+
+    def _iso_power(self, ax, signed=False):
+        """Constant-shaft-power curves, P = T * n * 2pi/60.
+
+        A gear change slides the operating point ALONG one of these and can never
+        move it to another. Draw them and the recurring question answers itself:
+        the map's best point sits on a 5.8 kW curve, the cycle's cruise band on the
+        0.5-2 kW curves, and no choice of ratio crosses between them.
+        """
+        if not self.disp["isopower"].get():
+            return
+        em = self.emap
+        n = np.linspace(1, em.rpm.max(), 400)
+        t_lim = ax.get_ylim()
+        for kw_level in ISO_POWER_KW:
+            t = kw_level * 1000.0 / (n * 2.0 * np.pi / 60.0)
+            for sign in ((1, -1) if signed else (1,)):
+                ax.plot(n, sign * t, color="k", lw=.8, ls=":", alpha=.55, zorder=4)
+            j = int(np.argmin(np.abs(t - (t_lim[1] * .62))))
+            if 0 < j < len(n) - 1 and t_lim[0] <= t[j] <= t_lim[1]:
+                ax.annotate(f"{kw_level:g} kW", (n[j], t[j]), fontsize=7, color="k",
+                            alpha=.75, zorder=5,
+                            bbox=dict(boxstyle="round,pad=.12", fc="w", ec="none",
+                                      alpha=.55))
+        ax.set_ylim(*t_lim)
 
     def _colorbar(self, mappable, ax, label, **kw):
         """Colour bar, unless the user switched it off (or nothing was drawn)."""
@@ -459,10 +500,12 @@ class ShiftOptimiserApp(ctk.CTk):
         otherwise the line set, otherwise None.
         """
         filled = lines = None
+        lo, hi = st.get("lo", 0.0), st.get("hi", 100.0)
         if st["fill"] > 0:
-            filled = ax.contourf(X, Y, Z, levels=st["fill"], cmap=st["cmap"], alpha=alpha)
+            filled = ax.contourf(X, Y, Z, levels=np.linspace(lo, hi, st["fill"] + 1),
+                                 cmap=st["cmap"], alpha=alpha, extend="both")
         if st["lines"] > 0:
-            lines = ax.contour(X, Y, Z, levels=st["lines"],
+            lines = ax.contour(X, Y, Z, levels=np.linspace(lo, hi, st["lines"] + 1),
                                colors="k" if filled is not None else None,
                                cmap=None if filled is not None else st["cmap"],
                                linewidths=.6, alpha=.6 if filled is not None else 1.0,
@@ -981,6 +1024,7 @@ class ShiftOptimiserApp(ctk.CTk):
         ax.set_ylim(0, min(em.torque.max(), p["motor"].peak_torque))
         ax.set_xlabel("Motor speed [rpm]")
         ax.set_ylabel("Motor torque [Nm]")
+        self._iso_power(ax)
         return c
 
     def _draw_points(self, r, p, _kind):
@@ -1069,6 +1113,7 @@ class ShiftOptimiserApp(ctk.CTk):
         ax.set_xlim(0, em.rpm.max())
         ax.set_ylim(tmin, tmax)
         ax.set_xlabel("Motor speed [rpm]")
+        self._iso_power(ax, signed=True)
         return c
 
     def _draw_shift(self, r, p, _kind):
@@ -1100,10 +1145,12 @@ class ShiftOptimiserApp(ctk.CTk):
                                  (ax[1], dns, COLORS["warning"], "Downshift  2 -> 1")):
             c = self._signed_background(A, p, tmin, tmax)
 
-            # the whole cloud underneath, so the shift points can be read in context
+            # The whole cloud underneath, so the shift points can be read in context.
+            # DARK colours on purpose: the cycle lives in the bright yellow-green part
+            # of viridis, where white and gold at low alpha are invisible.
             for gear, on, colr, mk in (
-                    (1, self.disp["lay_g1"].get(), "#ffffff", "o"),
-                    (2, self.disp["lay_g2"].get(), "#ffd400", "^")):
+                    (1, self.disp["lay_g1"].get(), CLOUD_G1, "o"),
+                    (2, self.disp["lay_g2"].get(), CLOUD_G2, "^")):
                 if not on:
                     continue
                 m = act_all & (r.gear == gear)
@@ -1112,8 +1159,8 @@ class ShiftOptimiserApp(ctk.CTk):
                     continue
                 if len(idx) > 6000:
                     idx = idx[:: int(np.ceil(len(idx) / 6000))]
-                A.scatter(r.motor_rpm[idx], r.motor_torque[idx], s=5, marker=mk,
-                          facecolor=colr, edgecolor="none", alpha=.22, zorder=2,
+                A.scatter(r.motor_rpm[idx], r.motor_torque[idx], s=9, marker=mk,
+                          facecolor=colr, edgecolor="none", alpha=.55, zorder=3,
                           label=f"all gear {gear}  ({int(m.sum()):,})")
             # every shift, not a sample of thirty: thin the ink instead of the data
             take = grp
@@ -1159,7 +1206,7 @@ class ShiftOptimiserApp(ctk.CTk):
                 A.set_title(f"{lab}   ({len(grp)} events, all drawn)\n"
                             f"the ratio alone moves it  {d_n:+.0f} rpm,  {d_t:+.2f} Nm",
                             fontweight="bold", fontsize=11)
-                A.legend(fontsize=7, loc="best", framealpha=.85)
+                A.legend(fontsize=7, loc="lower left", framealpha=.9)
             else:
                 A.set_title(f"{lab}   (none)", fontweight="bold", fontsize=11)
         ax[0].set_ylabel("Signed motor torque [Nm]\n(+ motoring,  - braking)")
