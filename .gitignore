@@ -7,8 +7,6 @@ venv/
 
 # Generated output
 figures/
-*.RUN.ipynb
-shift_study_report.html
 shift_study_report.body.html
 N603_two_speed_shift_sweep_results.csv
 
@@ -16,11 +14,7 @@ N603_two_speed_shift_sweep_results.csv
 /N603_AMT_onroadrange_SpeedBased_.csv
 /N603_42UH_230_Fineint_EfficiencyMap.xlsx
 
-# superseded by shift_core.py, and they carry another user's local paths
-City_drive_cycle_data_analysis_no_regen.ipynb
 
-# unrelated CAD
-*.step
 
 # Local scratch
 newview_*.png
@@ -33,3 +27,12 @@ desktop.ini
 
 # local Claude Code working file; the published copy is docs/ENGINEERING_NOTES.md
 CLAUDE.md
+
+# working copies at the top level; the published ones are in notebooks/ and report/
+/shift_study_report.html
+/shift_study_report.body.html
+/City_drive_cycle_data_analysis_no_regen.ipynb
+/City_drive_cycle_data_analysis_no_regen.RUN.ipynb
+
+# working copies at the top level; the published CAD lives in cad/
+/*.step

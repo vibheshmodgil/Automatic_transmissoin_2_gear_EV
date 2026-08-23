@@ -33,6 +33,9 @@ Windows users can double-click `Run Shift Optimiser.bat`.
 | `make_shift_report.py` | Builds a self-contained HTML report with all figures embedded. |
 | `sample_data/` | Synthetic cycle and map, plus the format specification. |
 | `docs/ENGINEERING_NOTES.md` | Full working notes: every defect found, why each decision was made. |
+| `notebooks/` | The original analysis this replaced. Historical — see its README for why it does not run and what it got wrong. |
+| `report/` | A self-contained HTML report with every figure embedded. |
+| `cad/` | STEP geometry for the unit. Not used by the code. |
 
 `shift_core.py` has no dependency on the GUI and is designed to be imported directly:
 
