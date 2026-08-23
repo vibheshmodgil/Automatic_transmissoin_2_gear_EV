@@ -70,7 +70,9 @@ motoring and braking.
 **Shift movement** — what each gear change does to the operating point. Draws the
 gearbox effect (same instant, ratio swapped) and the driver's demand change as
 *separate* arrows, because combined into one they are indistinguishable and badly
-misleading.
+misleading. Every shift is drawn, over the full operating cloud of both gears, and each
+layer — gear 1 points, gear 2 points, shift arrows, driver arrows, before/after markers —
+has its own switch under SHIFT-MOVEMENT LAYERS.
 
 ▸ **Gear comparison** — efficiency against road speed in both ratios, at several loads,
 with the crossover marked.
@@ -88,6 +90,9 @@ auxiliary load, pack resistance, shift energy and torque interruption all cancel
 both thresholds, slices through the optimum with net energy overlaid, and where that
 schedule puts the operating cloud. Use it when you want the answer to "which schedule
 keeps the motor in the best part of its map" without any other cost in the way.
+Candidates refused by the schedule constraints are drawn as red bars rather than dropped,
+and the summary lists how many went and why — a curve that starts above the speed you
+asked for is always explained.
 
 ▸ **Gradeability** — maximum sustainable grade at steady speed, per ratio.
 

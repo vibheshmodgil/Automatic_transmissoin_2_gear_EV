@@ -394,6 +394,13 @@ class ShiftOptimiserApp(ctk.CTk):
         self.disp["clabels"] = self._check(left, "Label contour lines", False)
         self.disp["envelope"] = self._check(left, "Envelope + peak marker", True)
         self.disp["negative"] = self._check(left, "Negative-torque (braking) half", True)
+
+        self._sec(left, "SHIFT-MOVEMENT LAYERS")
+        self.disp["lay_g1"] = self._check(left, "All gear 1 points", True)
+        self.disp["lay_g2"] = self._check(left, "All gear 2 points", True)
+        self.disp["lay_arrow"] = self._check(left, "Shift arrows (gearbox)", True)
+        self.disp["lay_driver"] = self._check(left, "Driver arrows (dotted)", True)
+        self.disp["lay_marks"] = self._check(left, "Before / after markers", True)
         self.disp["fill_levels"] = self._slider(left, "Shading levels", 2, 40, 22)
         self.disp["line_levels"] = self._slider(left, "Number of contour lines", 2, 25, 10)
         self.disp["cmap"] = self._menu(left, CMAPS, "viridis")
@@ -1088,9 +1095,26 @@ class ShiftOptimiserApp(ctk.CTk):
         if not self.disp["negative"].get():
             tmin = 0.0                       # motoring half only, by request
         ax = self.fig.subplots(1, 2, sharex=True, sharey=True)
+        act_all = np.abs(r.motor_torque) > 1e-9
         for A, grp, col, lab in ((ax[0], ups, COLORS["success"], "Upshift  1 -> 2"),
                                  (ax[1], dns, COLORS["warning"], "Downshift  2 -> 1")):
             c = self._signed_background(A, p, tmin, tmax)
+
+            # the whole cloud underneath, so the shift points can be read in context
+            for gear, on, colr, mk in (
+                    (1, self.disp["lay_g1"].get(), "#ffffff", "o"),
+                    (2, self.disp["lay_g2"].get(), "#ffd400", "^")):
+                if not on:
+                    continue
+                m = act_all & (r.gear == gear)
+                idx = np.flatnonzero(m)
+                if not len(idx):
+                    continue
+                if len(idx) > 6000:
+                    idx = idx[:: int(np.ceil(len(idx) / 6000))]
+                A.scatter(r.motor_rpm[idx], r.motor_torque[idx], s=5, marker=mk,
+                          facecolor=colr, edgecolor="none", alpha=.22, zorder=2,
+                          label=f"all gear {gear}  ({int(m.sum()):,})")
             # every shift, not a sample of thirty: thin the ink instead of the data
             take = grp
             dense = max(1, len(take))
@@ -1099,7 +1123,7 @@ class ShiftOptimiserApp(ctk.CTk):
             new_gear = 2 if lab.startswith("Upshift") else 1
             if len(take):
                 cf_n, cf_t = sc.counterfactual_point(r, take, new_gear, p["gb"])
-            for k, i in enumerate(take):
+            for k, i in enumerate(take if self.disp["lay_arrow"].get() else []):
                 # solid: what the GEARBOX does - same instant, ratio swapped
                 A.annotate("", xy=(cf_n[k], cf_t[k]),
                            xytext=(r.motor_rpm[i], r.motor_torque[i]),
@@ -1107,6 +1131,8 @@ class ShiftOptimiserApp(ctk.CTk):
                                            color=col, lw=a_lw, alpha=a_al,
                                            shrinkA=0, shrinkB=0), zorder=7)
                 # dotted: what the DRIVER does in the same step - demand moving on
+                if not self.disp["lay_driver"].get():
+                    continue
                 A.annotate("", xy=(r.motor_rpm[i + 1], r.motor_torque[i + 1]),
                            xytext=(cf_n[k], cf_t[k]),
                            arrowprops=dict(arrowstyle="-|>,head_width=.18,head_length=.4",
@@ -1115,15 +1141,18 @@ class ShiftOptimiserApp(ctk.CTk):
                                            alpha=min(.8, a_al), shrinkA=0, shrinkB=0),
                            zorder=6)
             if len(grp):
-                A.scatter(r.motor_rpm[grp], r.motor_torque[grp], s=26, marker="o",
-                          facecolor="none", edgecolor=col, lw=1.3, zorder=8,
-                          label="before the shift")
+                # computed whether or not the markers are drawn - the panel title
+                # quotes it, and turning a layer off must not change the numbers
                 gn, gt = sc.counterfactual_point(r, grp, new_gear, p["gb"])
-                A.scatter(gn, gt, s=42, marker="X", color=col, edgecolor="k", lw=.5,
-                          zorder=8, label="after the shift (same instant)")
-                A.scatter(r.motor_rpm[grp + 1], r.motor_torque[grp + 1], s=18, marker=".",
-                          color=COLORS["text_muted"], alpha=.7, zorder=7,
-                          label="next sample (driver moved on)")
+                if self.disp["lay_marks"].get():
+                    A.scatter(r.motor_rpm[grp], r.motor_torque[grp], s=26, marker="o",
+                              facecolor="none", edgecolor=col, lw=1.3, zorder=8,
+                              label="before the shift")
+                    A.scatter(gn, gt, s=42, marker="X", color=col, edgecolor="k", lw=.5,
+                              zorder=8, label="after the shift (same instant)")
+                    A.scatter(r.motor_rpm[grp + 1], r.motor_torque[grp + 1], s=18,
+                              marker=".", color=COLORS["text_muted"], alpha=.7, zorder=7,
+                              label="next sample (driver moved on)")
                 # the gearbox delta, not the temporal one: same instant, ratio swapped
                 d_n = np.mean(gn - r.motor_rpm[grp])
                 d_t = np.mean(gt - r.motor_torque[grp])
@@ -1491,7 +1520,8 @@ class ShiftOptimiserApp(ctk.CTk):
         one question the energy sweeps keep burying: which schedule keeps the motor
         in the best part of its map over this cycle.
         """
-        df = sw.table[sw.table["feasible"]]
+        full = sw.table
+        df = full[full["feasible"]]
         if df.empty or sw.best is None:
             self.fig.text(.5, .5, "No feasible schedule in this grid",
                           ha="center", va="center", color=COLORS["danger"])
@@ -1507,8 +1537,13 @@ class ShiftOptimiserApp(ctk.CTk):
         a_pts = self.fig.add_subplot(gs[1, 1])
 
         # --- 1. the efficiency surface over both thresholds ------------------
-        piv = df.pivot_table(index="downshift", columns="upshift",
-                             values="mean_efficiency")
+        # pivot the FULL grid, not just the survivors: a rejected candidate must
+        # leave a visible hole at the speed you asked for, not silently shrink the
+        # axis so the plot looks like it started somewhere else
+        shown = full.copy()
+        shown.loc[~shown["feasible"], "mean_efficiency"] = np.nan
+        piv = shown.pivot_table(index="downshift", columns="upshift",
+                                values="mean_efficiency", dropna=False)
         m = a_map.pcolormesh(piv.columns, piv.index, piv.to_numpy() * 100,
                              shading="auto", cmap=self._map_style()["cmap"])
         self._colorbar(m, a_map, "Mean motor efficiency [%]")
@@ -1527,9 +1562,17 @@ class ShiftOptimiserApp(ctk.CTk):
         for ax, col, fixed_col, fixed_val, xlabel in (
                 (a_up, "upshift", "downshift", b.downshift, "1-2 upshift speed [km/h]"),
                 (a_dn, "downshift", "upshift", b.upshift, "2-1 downshift speed [km/h]")):
-            sl = df[np.isclose(df[fixed_col], fixed_val)].sort_values(col)
+            sl_all = full[np.isclose(full[fixed_col], fixed_val)].sort_values(col)
+            sl = sl_all[sl_all["feasible"]]
             if sl.empty:
                 ax.axis("off"); continue
+            rej = sl_all[~sl_all["feasible"]]
+            for xv in rej[col]:
+                ax.axvline(xv, color=COLORS["danger"], lw=5, alpha=.15, zorder=0)
+            if len(rej):
+                ax.plot([], [], lw=5, color=COLORS["danger"], alpha=.3,
+                        label=f"rejected ({len(rej)})")
+                ax.set_xlim(sl_all[col].min() - .5, sl_all[col].max() + .5)
             ax.plot(sl[col], sl["mean_efficiency"] * 100, "o-", ms=4,
                     color=COLORS["warning"], label="motor efficiency")
             ax.scatter([getattr(b, col)], [b.mean_efficiency * 100], s=150, zorder=6,
@@ -1545,6 +1588,8 @@ class ShiftOptimiserApp(ctk.CTk):
             ax.set_title(f"{col} at {fixed_col} {fixed_val:g} km/h",
                          fontweight="bold", fontsize=11)
             ax.grid(alpha=.3)
+            if len(rej):
+                ax.legend(fontsize=8, loc="lower left")
 
         # --- 4. where that schedule puts the motor ---------------------------
         r = sc.simulate(self.cycle, self.emap, b.upshift, b.downshift,
@@ -1575,13 +1620,14 @@ class ShiftOptimiserApp(ctk.CTk):
 
     def _effopt_summary(self, sw, b, e_row, df):
         NL = chr(10)
+        full = sw.table          # every candidate tried, rejected ones included
         lo, hi = df["mean_efficiency"].min(), df["mean_efficiency"].max()
         L = ["Shift schedule ranked on MOTOR EFFICIENCY alone", "=" * 74, "",
              "  mean_efficiency = shaft output energy / electrical input energy over",
              "  the motoring samples. The auxiliary load, the pack resistance, the",
              "  shift actuation energy and the torque interruption all cancel out of",
              "  that ratio, so nothing here is competing with the map.", "",
-             f"  {len(df)} feasible schedules on the grid",
+             f"  {len(df)} feasible schedules of {len(full)} tried",
              f"  efficiency spread {lo:.3%} to {hi:.3%}  ({100*(hi-lo):.2f} points)", "",
              f"  BEST EFFICIENCY   upshift {b.upshift:g} / downshift {b.downshift:g}"
              f"   ->  {b.mean_efficiency:.3%}",
@@ -1600,6 +1646,15 @@ class ShiftOptimiserApp(ctk.CTk):
                   f"  costs {d_net:+.1f} Wh of net energy - that gap is the price the rest",
                   "  of the system charges for sitting in the efficient place (shift",
                   "  interruptions, reflected inertia, pack current)."]
+        rej = full[~full["feasible"]]
+        if len(rej):
+            L += ["", f"  {len(rej)} of {len(full)} candidates were REJECTED before being",
+                  "  scored, which is why a curve can start above the speed you asked for:"]
+            reasons = rej["reasons"].astype(str).str.split(":").str[0]
+            for why, n in reasons.value_counts().head(4).items():
+                L.append(f"    {n:>5} x  {why.strip()[:62]}")
+            L += ["  Relax them under SHIFT COST (minimum band, max acceleration given",
+                  "  up, minimum reserve) if you want the whole range scored."]
         L += ["",
               "  Read the two slices together: the orange curve is what the motor map",
               "  wants, the blue dashed curve is what the battery pays. Where they",
