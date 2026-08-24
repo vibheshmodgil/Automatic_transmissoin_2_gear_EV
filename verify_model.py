@@ -109,15 +109,35 @@ for gear, ratio, eta in ((1, gb.ratio_1, gb.eta_1), (2, gb.ratio_2, gb.eta_2)):
           f"n exact; P_motor/P_wheel = {np.mean(p_m[mot_m]/p_w[mot_m]):.9f}, "
           f"1/eta = {1/eta:.9f}")
 
-section("A3 Battery model",
-        "the terminal power must satisfy P - (P/V)^2*R = P_demand exactly.")
-p_dem = np.linspace(-8000, 14000, 5000)
-p_t = M._terminal_power(p_dem, el)
-fin = np.isfinite(p_t) & (p_dem > 0)
-resid = p_t[fin] - (p_t[fin] / el.voltage) ** 2 * el.pack_resistance - p_dem[fin]
-check("A3 pack I^2R solved exactly, not to first order",
-      np.max(np.abs(resid)) < 1e-6,
-      f"max residual {np.max(np.abs(resid)):.2e} W over {int(fin.sum())} points")
+section("A3 Shift actuation energy",
+        "a gear change costs V*I*t at the actuator, and the cycle is charged that "
+        "for every change it makes - no more, no less. The pack is an ideal source: "
+        "the I^2R term was removed because it shifts every candidate by nearly the "
+        "same amount and so decides nothing, while needing a resistance nobody "
+        "measured.")
+dflt = M.ShiftCost()
+check("A3 actuation energy is 12 V x 20 A x 0.5 s = 120 J",
+      abs(dflt.energy_per_shift - 120.0) < 1e-12
+      and abs(dflt.interrupt_s - 0.5) < 1e-12,
+      f"{dflt.actuator_voltage:g} V x {dflt.actuator_current:g} A x "
+      f"{dflt.actuator_time_s:g} s = {dflt.energy_per_shift:g} J, "
+      f"traction cut {dflt.interrupt_s:g} s")
+ra = M.simulate(cy, em, 22, 10, cost=dflt, keep_arrays=True, **P)
+n_sh = ra.upshifts + ra.downshifts
+check("A3 the cycle is charged exactly n_shifts x V*I*t",
+      abs(ra.shift_energy_kwh - n_sh * dflt.actuation_energy / 3.6e6) < 1e-15,
+      f"{n_sh} shifts x 120 J = {1000*ra.shift_energy_kwh:.3f} Wh actuation, "
+      f"+ {1000*ra.interrupt_energy_kwh:.1f} Wh from the {dflt.interrupt_s:g} s cut")
+scaled = M.ShiftCost(actuator_current=40.0)
+r2 = M.simulate(cy, em, 22, 10, cost=scaled, **P)
+check("A3 doubling the actuator current doubles the actuation energy",
+      abs(r2.shift_energy_kwh - 2 * ra.shift_energy_kwh) < 1e-15,
+      f"20 A -> {1000*ra.shift_energy_kwh:.3f} Wh, 40 A -> "
+      f"{1000*r2.shift_energy_kwh:.3f} Wh")
+check("A3 the pack is lossless: terminal power == demand",
+      np.array_equal(M._terminal_power(np.linspace(-8000, 14000, 5000), el),
+                     np.linspace(-8000, 14000, 5000)),
+      "no I^2R term; Electrical.voltage is informational only")
 
 section("A4 Efficiency map",
         "a query at a grid node must return that cell, untouched.")

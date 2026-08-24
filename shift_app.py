@@ -93,15 +93,15 @@ FIELDS = [
     ("Gearbox", "Efficiency gear 1", "eta_1", "0.97", "gb"),
     ("Gearbox", "Efficiency gear 2", "eta_2", "0.97", "gb"),
     ("Electrical", "Pack voltage [V]", "voltage", "52", "el"),
-    ("Electrical", "Pack resistance [ohm]", "pack_resistance", "0.020", "el"),
     ("Electrical", "Auxiliary load [W]", "aux_load", "150", "el"),
     ("Electrical", "Battery power limit [W]", "max_power", "15000", "el"),
     ("Regen", "Regen enabled (0/1)", "regen", "0", "num"),
     ("Regen", "Brake torque to motor [0-1]", "regen_fraction", "0.70", "el"),
     ("Regen", "Charge power limit [W] (0=same)", "regen_max_power", "0", "el"),
     ("Regen", "Blend out below [km/h]", "regen_min_speed", "5", "el"),
-    ("Shift cost", "Energy per shift [J]", "energy_per_shift", "500", "cost"),
-    ("Shift cost", "Torque interruption [s]", "interrupt_s", "0.4", "cost"),
+    ("Shift cost", "Actuator voltage [V]", "actuator_voltage", "12", "cost"),
+    ("Shift cost", "Actuator current [A]", "actuator_current", "20", "cost"),
+    ("Shift cost", "Shift duration [s]", "actuator_time_s", "0.5", "cost"),
     ("Shift cost", "Max shifts per hour", "max_shifts_per_hour", "120", "cost"),
     ("Shift cost", "Min hysteresis band [km/h]", "min_band_kmh", "3", "cost"),
     ("Shift cost", "Min accel reserve [m/s2]", "min_accel_reserve", "0.5", "cost"),
@@ -616,18 +616,20 @@ class ShiftOptimiserApp(ctk.CTk):
                        self._f("mot", "max_rpm", 10000), self._f("mot", "inertia", .005))
         gb = sc.Gearbox(self._f("gb", "ratio_1", 19), self._f("gb", "ratio_2", 11),
                         self._f("gb", "eta_1", .97), self._f("gb", "eta_2", .97))
-        el = sc.Electrical(self._f("el", "voltage", 52), self._f("el", "pack_resistance", .02),
+        el = sc.Electrical(self._f("el", "voltage", 52),
                            self._f("el", "aux_load", 150), self._f("el", "max_power", 15000),
                            regen_enabled=bool(self._f("num", "regen", 0)),
                            regen_fraction=self._f("el", "regen_fraction", 0.70),
                            regen_max_power=self._f("el", "regen_max_power", 0.0),
                            regen_min_speed_kmh=self._f("el", "regen_min_speed", 5.0))
-        cost = sc.ShiftCost(self._f("cost", "energy_per_shift", 0),
-                            self._f("cost", "interrupt_s", 0),
-                            self._f("cost", "max_shifts_per_hour", np.inf) or np.inf,
-                            min_band_kmh=self._f("cost", "min_band_kmh", 2.0),
-                            min_accel_reserve=self._f("cost", "min_accel_reserve", 0.0),
-                            max_accel_loss=self._f("cost", "max_accel_loss", 1.0))
+        cost = sc.ShiftCost(
+            max_shifts_per_hour=self._f("cost", "max_shifts_per_hour", np.inf) or np.inf,
+            min_band_kmh=self._f("cost", "min_band_kmh", 2.0),
+            min_accel_reserve=self._f("cost", "min_accel_reserve", 0.0),
+            max_accel_loss=self._f("cost", "max_accel_loss", 1.0),
+            actuator_voltage=self._f("cost", "actuator_voltage", 12.0),
+            actuator_current=self._f("cost", "actuator_current", 20.0),
+            actuator_time_s=self._f("cost", "actuator_time_s", 0.5))
         num = sc.Numerics(smooth_window=int(self._f("num", "smooth_window", 0)))
         return dict(veh=veh, motor=mot, gb=gb, elec=el, cost=cost, num=num)
 
@@ -1879,7 +1881,7 @@ class ShiftOptimiserApp(ctk.CTk):
                   f"  so the shift speed on its own is worth that much."]
             if not b.shift_times:
                 gap = bs["time_s"] - b.time_s
-                cut = self._f("cost", "interrupt_s", 0.0)
+                cut = self._f("cost", "actuator_time_s", 0.5)
                 L.append(f"  Not shifting at all is {gap:.3f} s faster still.")
                 if cut > 0:
                     L.append(f"  The torque interruption is {cut:.3f} s per shift, so at "
@@ -1917,7 +1919,7 @@ class ShiftOptimiserApp(ctk.CTk):
         """Rank every schedule on motor efficiency alone.
 
         mean_efficiency is shaft output over electrical input across the motoring
-        samples, so the auxiliary load, the pack resistance, the shift actuation
+        samples, so the auxiliary load, the shift actuation
         energy and the torque interruption all cancel out of it. What is left is the
         one question the energy sweeps keep burying: which schedule keeps the motor
         in the best part of its map over this cycle.
@@ -2026,8 +2028,8 @@ class ShiftOptimiserApp(ctk.CTk):
         lo, hi = df["mean_efficiency"].min(), df["mean_efficiency"].max()
         L = ["Shift schedule ranked on MOTOR EFFICIENCY alone", "=" * 74, "",
              "  mean_efficiency = shaft output energy / electrical input energy over",
-             "  the motoring samples. The auxiliary load, the pack resistance, the",
-             "  shift actuation energy and the torque interruption all cancel out of",
+             "  the motoring samples. The auxiliary load, the shift actuation energy",
+             "  and the torque interruption all cancel out of",
              "  that ratio, so nothing here is competing with the map.", "",
              f"  {len(df)} feasible schedules of {len(full)} tried",
              f"  efficiency spread {lo:.3%} to {hi:.3%}  ({100*(hi-lo):.2f} points)", "",
@@ -2467,7 +2469,12 @@ class ShiftOptimiserApp(ctk.CTk):
              + (f"   ({r.regen_samples:,} pts, mean {r.regen_torque_mean:.1f} Nm "
                 f"to the motor)" if r.regen_samples else "   (regen off)"),
              f"  net                 {r.net_kwh:10.4f} kWh   <- the objective",
-             f"  shift actuation     {r.shift_energy_kwh*1000:10.1f} Wh",
+             f"  shift actuation     {r.shift_energy_kwh*1000:10.1f} Wh   "
+             f"({self._f('cost','actuator_voltage',12):g} V x "
+             f"{self._f('cost','actuator_current',20):g} A x "
+             f"{self._f('cost','actuator_time_s',0.5):g} s = "
+             f"{self._f('cost','actuator_voltage',12)*self._f('cost','actuator_current',20)*self._f('cost','actuator_time_s',0.5):.0f} J "
+             f"x {r.upshifts+r.downshifts} shifts)",
              f"  torque interruption {r.interrupt_energy_kwh*1000:10.1f} Wh "
              f"({r.shifts_under_traction} of {r.upshifts+r.downshifts} shifts under traction)",
              "",
@@ -2518,7 +2525,16 @@ class ShiftOptimiserApp(ctk.CTk):
         return L
 
     def _sweep_summary(self, sw, col):
+        j = (self._f("cost", "actuator_voltage", 12.0)
+             * self._f("cost", "actuator_current", 20.0)
+             * self._f("cost", "actuator_time_s", 0.5))
         L = [f"Sweep over {col}", "=" * 74,
+             f"  each gear change costs {j:.0f} J at the actuator "
+             f"({self._f('cost','actuator_voltage',12):g} V x "
+             f"{self._f('cost','actuator_current',20):g} A x "
+             f"{self._f('cost','actuator_time_s',0.5):g} s) plus "
+             f"{self._f('cost','actuator_time_s',0.5):g} s of zero traction,",
+             "  so a schedule that shifts more has to earn it back",
              f"  candidates evaluated : {len(sw.table)}",
              f"  feasible             : {int(sw.table['feasible'].sum())}",
              f"  rejected             : {int((~sw.table['feasible']).sum())}"]
@@ -2532,7 +2548,10 @@ class ShiftOptimiserApp(ctk.CTk):
                    f"        {b.consumed_kwh:.4f} kWh   {b.wh_per_km:.1f} Wh/km"),
                   f"        {b.upshifts+b.downshifts} shifts ({b.shifts_per_hour:.1f}/h), "
                   f"gear 2 {b.time_gear2_pct:.1f} % of the time",
-                  f"        mean efficiency {b.mean_efficiency:.2%}"]
+                  f"        mean efficiency {b.mean_efficiency:.2%}",
+                  f"        shift cost paid {1000*(b.shift_energy_kwh+b.interrupt_energy_kwh):.1f} Wh "
+                  f"({1000*b.shift_energy_kwh:.1f} Wh actuator "
+                  f"+ {1000*b.interrupt_energy_kwh:.1f} Wh traction cut)"]
             spread = sw.table.loc[sw.table["feasible"], "consumed_kwh"]
             if len(spread) > 1:
                 L.append(f"        spread across feasible set: "
@@ -2587,7 +2606,7 @@ class ShiftOptimiserApp(ctk.CTk):
                            ("gearbox", "gearbox loss"),
                            ("motor", "MOTOR loss (efficiency)"),
                            ("aux", "auxiliary load"),
-                           ("pack", "pack I2R")):
+                           ("shift", "shift actuator + cut")):
             d = 1000 * (bw[key] - bb[key])
             L.append(f"    {label:<26}{bb[key]:10.4f}{bw[key]:10.4f}{d:+10.1f} Wh")
         L += [f"    {'mean motor efficiency':<26}{bb['efficiency']:9.2%}"

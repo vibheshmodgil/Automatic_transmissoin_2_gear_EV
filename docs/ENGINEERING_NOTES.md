@@ -284,7 +284,7 @@ Run: `python shift_app.py`
 | P2 | `Vehicle.grade_deg` real; plus `gradeability_table()` for the meaningful per-gear check | see result below |
 | P3 | Reflected rotor inertia `J·G²/r²`, two-pass because gear choice depends on load | gear-dependent, so the ratios compare fairly |
 | P4 | Only blank cells missing (genuine low-η kept); nearest-neighbour on **normalised** axes; above-envelope flagged not filled | fallback 2439 at baseline |
-| P5 | Aux load + pack I²R solved exactly (quadratic root, not first-order) | consumed 8.84 → 10.31 kWh at baseline |
+| P5 | Aux load (the pack I²R term has since been removed — see §7k) | consumed 8.84 → 10.31 kWh at baseline |
 | P6 | Optional Savitzky-Golay before `np.gradient` | `Numerics.smooth_window` |
 | P7 | Energy per shift, torque-interruption window, shifts/hour cap | see result below |
 | — | Wh/km, distance, time-in-gear, energy-weighted mean efficiency | all in `ShiftResult` |
@@ -916,6 +916,69 @@ be argued on tractive-force continuity: **upshift at 20 km/h**, where the handov
 
 Verified by C8 in `verify_model.py` (4 checks). Defaults now shipped in the app:
 minimum band 3 km/h, maximum acceleration given up 10 %, minimum reserve 0.5 m/s2.
+
+## 7k. The shift actuator is the shift cost — and the pack is ideal again
+
+Two changes, both asked for directly: give every gear change the energy the hardware
+actually costs, and delete the I²R term that was never measured.
+
+### `energy_per_shift` is no longer a tuning knob
+
+The vehicle team supplied the actuator: **12 V, 20 A, 0.5 s per change**. So
+
+```
+energy_per_shift = V x I x t = 12 x 20 x 0.5 = 120 J
+interrupt_s      = t         = 0.5 s
+```
+
+`ShiftCost` now carries `actuator_voltage` / `actuator_current` / `actuator_time_s` and
+derives both costs in `__post_init__`. `energy_per_shift` and `interrupt_s` default to
+`None` meaning *derive*; passing numbers still overrides (`ShiftCost(0, 0, np.inf)` is
+still the free-shifting baseline every comparison is drawn against). Every sweep goes
+through `simulate()`, so **the upshift sweep, the downshift sweep and the combined grid
+all inherit the penalty** — that was the whole point of putting the costs on `ShiftCost`
+in §7j, and nothing new had to be wired into the sweeps.
+
+The traction cut is *not* a second free parameter any more either: the actuator is moving
+for 0.5 s, so traction is gone for 0.5 s. One number, one physical event.
+
+### What it costs, and what it moves
+
+Baseline 22/10 on the stand-in data, 136 shifts:
+
+| term | Wh |
+|---|---|
+| actuator, 136 x 120 J | **4.5** |
+| traction cut, 0.5 s x local traction power on the 78 shifts under load | **48.3** |
+| total | 52.8 Wh of a 9.91 kWh cycle (0.53 %) |
+
+The actuator itself is small; the cut it forces is 10x bigger. Both scale with shift
+count, which is exactly the penalty that was wanted. Effect on the sweeps (min band 3,
+max accel given up 10 %):
+
+| sweep | free shifting | 12 V x 20 A x 0.5 s |
+|---|---|---|
+| upshift (D = 10) | 22 km/h, 9.8620 kWh, 136 shifts | **18 km/h**, 9.9068 kWh, 136 shifts |
+| downshift (U = 22) | 10 km/h, 9.8620 kWh, 136 shifts | **7 km/h**, 9.8877 kWh, **62 shifts** |
+
+The downshift answer is the one to read: charging for shifts more than halves the shift
+count the optimiser is willing to buy. It does **not** overturn §7h — the whole
+gear-selection prize is still under 0.5 % — but the schedule is now paying a real price
+for chatter instead of a made-up one.
+
+### I²R removed
+
+`Electrical.pack_resistance` is gone and `_terminal_power()` returns its argument. The
+reason is that it decided nothing: a whole-pack loss scales with total current, so it
+shifts every candidate schedule by nearly the same amount, and it required an internal
+resistance nobody has measured on this pack. `Electrical.voltage` stays as an
+informational field. `energy_breakdown()`'s `pack` term is replaced by a **`shift`** term
+(actuator + cut), which is the term that actually separates candidates.
+
+Verified by A3 in `verify_model.py` (4 checks): 120 J derived, charged exactly
+`n_shifts x V x I x t`, linear in current, and the pack returns demand unchanged.
+40/40 checks still pass.
+
 
 ## 8. Fix order (first four change the answer)
 

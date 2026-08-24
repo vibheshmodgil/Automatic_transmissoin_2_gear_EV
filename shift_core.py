@@ -18,7 +18,8 @@ P3  Reflected inertia       -- rotor inertia referred to the wheel (scales with 
 P4  Efficiency map          -- genuine low-efficiency cells kept; only blank cells are
                                missing; nearest-neighbour fallback uses NORMALISED axes;
                                above-envelope points are flagged infeasible, not filled.
-P5  Electrical losses       -- constant auxiliary load + pack I^2R solved exactly.
+P5  Electrical losses       -- constant auxiliary load; the pack itself is an
+                              ideal source (I^2R removed, see _terminal_power).
 P6  Differentiation noise   -- optional Savitzky-Golay smoothing before np.gradient.
 P7  Shift cost              -- energy per shift and a torque-interruption window.
 B3  numpy<2.0               -- uses np.trapz.
@@ -99,8 +100,8 @@ class Gearbox:
 
 @dataclass
 class Electrical:
-    voltage: float = 52.0           # V  (P5 - was declared but unused)
-    pack_resistance: float = 0.020  # ohm; 0 disables I^2R
+    voltage: float = 52.0           # V  nominal pack; informational only - the pack
+                                    # is modelled as an ideal source (see below)
     aux_load: float = 150.0         # W constant draw; 0 disables
     max_power: float = 15_000.0     # W magnitude limit
     regen_enabled: bool = False     # notebook is the "no regen" configuration
@@ -124,9 +125,16 @@ class ShiftCost:
     must satisfy. The constraints are here rather than in the sweeps because every
     sweep goes through simulate(), so putting them in one place means no search can
     quietly return a candidate the others would reject.
+
+    The actuation energy is not a free tuning knob any more. The shift actuator
+    runs off a 12 V supply drawing 20 A for the 0.5 s a change takes, so a gear
+    change costs 12 x 20 x 0.5 = 120 J, drawn whether the vehicle is pulling,
+    coasting or braking. Leave ``energy_per_shift`` and ``interrupt_s`` at None
+    to derive both from the actuator below; pass numbers to override (0, 0 is
+    the free-shifting baseline the notebook assumed).
     """
-    energy_per_shift: float = 0.0   # J drawn per gear change (sync + actuation)
-    interrupt_s: float = 0.0        # s of torque interruption per shift
+    energy_per_shift: Optional[float] = None  # J per gear change; None -> V*I*t
+    interrupt_s: Optional[float] = None       # s of traction cut; None -> actuator_time_s
     max_shifts_per_hour: float = np.inf
     min_band_kmh: float = 2.0       # hysteresis width; a 1 km/h band is chatter, not
                                     # a schedule, and the shifts/h cap does not catch it
@@ -134,6 +142,28 @@ class ShiftCost:
                                     # upshift speed; 0 disables the check
     max_accel_loss: float = 1.0     # fraction of the low ratio's acceleration that may
                                     # be given up by upshifting; 1.0 disables the check
+
+    # The shift actuator, as specified by the vehicle team.
+    actuator_voltage: float = 12.0  # V
+    actuator_current: float = 20.0  # A drawn while the actuator is moving
+    actuator_time_s: float = 0.5    # s the change takes end to end
+
+    def __post_init__(self):
+        if self.energy_per_shift is None:
+            self.energy_per_shift = self.actuation_energy
+        if self.interrupt_s is None:
+            # the traction cut lasts exactly as long as the actuator is moving
+            self.interrupt_s = self.actuator_time_s
+
+    @property
+    def actuation_energy(self) -> float:
+        """J per gear change taken from the actuator supply: V x I x t."""
+        return self.actuator_voltage * self.actuator_current * self.actuator_time_s
+
+    @property
+    def actuation_power(self) -> float:
+        """W the actuator draws while it is moving."""
+        return self.actuator_voltage * self.actuator_current
 
 
 @dataclass
@@ -428,24 +458,15 @@ def gear_sequence(speed_kmh: np.ndarray, upshift: float, downshift: float) -> np
 # Battery model (P5)
 # ---------------------------------------------------------------------------
 def _terminal_power(p_demand: np.ndarray, elec: Electrical) -> np.ndarray:
-    """Solve P_term - (P_term/V)^2 R = P_demand exactly.
+    """Pack terminal power = demand.
 
-    Root: P = V^2/(2R) * (1 - sqrt(1 - 4 R P_dem / V^2)). Falls back to the
-    lossless value when R = 0 or the demand exceeds what the pack can deliver.
+    The pack is modelled as an ideal source. The I^2R term that used to live here
+    was removed deliberately: it is a whole-pack loss that scales with total
+    current, so it shifts every candidate schedule by nearly the same amount and
+    changes no comparison, while requiring an internal resistance nobody has
+    measured. Kept as a function so the call site still reads as a battery model.
     """
-    if elec.pack_resistance <= 0 or elec.voltage <= 0:
-        return p_demand
-    v2, r = elec.voltage ** 2, elec.pack_resistance
-    disc = 1.0 - 4.0 * r * p_demand / v2
-    out = np.where(disc >= 0.0,
-                   v2 / (2.0 * r) * (1.0 - np.sqrt(np.clip(disc, 0.0, None))),
-                   np.nan)
-    # Discharging only; on regen the same resistance reduces what is recovered.
-    neg = p_demand < 0
-    if neg.any():
-        i = p_demand[neg] / elec.voltage
-        out[neg] = p_demand[neg] + i ** 2 * r
-    return out
+    return p_demand
 
 
 # ---------------------------------------------------------------------------
@@ -622,7 +643,7 @@ def simulate(cycle: CycleData, emap: EfficiencyMap, upshift: float, downshift: f
     # contributes nothing - which is why braking-side efficiency is then irrelevant
 
     p_dem = p_shaft + elec.aux_load          # P5 aux load
-    p_batt = _terminal_power(p_dem, elec)    # P5 pack I^2R
+    p_batt = _terminal_power(p_dem, elec)    # P5 - ideal pack, aux load only
     p_batt[active & ~point_ok] = np.nan
 
     batt_bad = np.isfinite(p_batt) & (np.abs(p_batt) > elec.max_power)
@@ -1026,7 +1047,8 @@ def energy_breakdown(res: ShiftResult, cycle: CycleData, veh: Vehicle = None,
         gearbox-> mesh loss
         motor  -> the efficiency term: what the map costs you
         aux    -> constant hotel load
-        pack   -> I^2R in the battery
+        shift  -> the gear actuator (V x I x t per change) plus the energy lost
+                  to the traction cut while it moves
 
     This is the question a sweep cannot answer on its own: two schedules differ by
     some number of Wh, but until the difference is split into these terms you cannot
@@ -1051,8 +1073,9 @@ def energy_breakdown(res: ShiftResult, cycle: CycleData, veh: Vehicle = None,
     e_aux = elec.aux_load * cycle.duration / 3.6e6
     e_batt = _trapz(np.maximum(np.nan_to_num(res.battery_power), 0.0),
                     cycle.time) / 3.6e6
+    e_shift = res.shift_energy_kwh + res.interrupt_energy_kwh
     return dict(wheel=e_wheel, gearbox=e_shaft - e_wheel, motor=e_elec - e_shaft,
-                aux=e_aux, pack=e_batt - e_elec - e_aux, battery=e_batt,
+                aux=e_aux, shift=e_shift, battery=e_batt + e_shift,
                 efficiency=e_shaft / e_elec if e_elec > 0 else np.nan)
 
 
@@ -1310,7 +1333,7 @@ def sweep_efficiency(cycle: CycleData, emap: EfficiencyMap,
 
     ``ShiftResult.mean_efficiency`` is shaft output energy over electrical input
     energy across the motoring samples. It contains nothing but the map: the
-    auxiliary load, the pack resistance, the shift actuation energy and the torque
+    auxiliary load, the shift actuation energy and the torque
     interruption all cancel out of it, because none of them appear in either
     integral. So maximising it answers exactly one question -
 

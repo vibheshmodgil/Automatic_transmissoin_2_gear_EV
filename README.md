@@ -29,7 +29,7 @@ Windows users can double-click `Run Shift Optimiser.bat`.
 |---|---|
 | `shift_core.py` | Physics engine. Pure functions and dataclasses — no UI, no globals. |
 | `shift_app.py` | CustomTkinter front end. Presentation only; every number comes from the core. |
-| `verify_model.py` | Independent verification suite. 37 checks against closed forms and analytic identities. |
+| `verify_model.py` | Independent verification suite. 40 checks against closed forms and analytic identities. |
 | `make_shift_report.py` | Builds a self-contained HTML report with all figures embedded. |
 | `sample_data/` | Synthetic cycle and map, plus the format specification. |
 | `docs/ENGINEERING_NOTES.md` | Full working notes: every defect found, why each decision was made. |
@@ -50,7 +50,7 @@ result = sc.simulate(cycle, emap, upshift=20, downshift=10,
                      motor=sc.Motor(peak_torque=45, peak_power=11_000, max_rpm=10_000),
                      gb=sc.Gearbox(ratio_1=19, ratio_2=11),
                      elec=sc.Electrical(voltage=52, regen_enabled=True),
-                     cost=sc.ShiftCost(energy_per_shift=500, interrupt_s=0.4))
+                     cost=sc.ShiftCost())   # 12 V x 20 A x 0.5 s = 120 J per shift
 
 print(result.net_kwh, result.wh_per_km, result.reserve_at_upshift)
 ```
@@ -101,10 +101,10 @@ boundary is a curve; your shift thresholds are vertical lines drawn on top of it
 
 **Upshift / Downshift / Combined sweeps** — energy against threshold, with mean motor
 efficiency on a second axis, feasibility, convergence, a breakdown of what the optimum
-actually won on (wheel / gearbox / motor / aux / pack), and the theoretical ceiling.
+actually won on (wheel / gearbox / motor / aux / shift), and the theoretical ceiling.
 
 **Efficiency-only optimum** — every schedule ranked on motor efficiency *alone*. The
-auxiliary load, pack resistance, shift energy and torque interruption all cancel out of
+auxiliary load, shift energy and torque interruption all cancel out of
 `mean_efficiency`, so nothing competes with the map. Shows the efficiency surface over
 both thresholds, slices through the optimum with net energy overlaid, and where that
 schedule puts the operating cloud. Use it when you want the answer to "which schedule
@@ -210,12 +210,17 @@ each other.
 - **Efficiency map** — genuine low-efficiency cells kept; nearest-neighbour fallback on
   normalised axes; physical extrapolation below the lowest measured torque row rather
   than substituting a loaded point's efficiency.
-- **Electrical** — constant auxiliary load and pack I²R solved exactly (quadratic root,
-  not linearised).
+- **Electrical** — constant auxiliary load. The pack itself is an ideal source: the
+  I²R term was removed because a whole-pack loss moves every candidate schedule by
+  nearly the same amount, so it decides nothing while requiring an internal resistance
+  nobody has measured.
 - **Regen** — blend fraction, charge-power limit, low-speed blend-out, capped by the
   envelope, with the map queried at the torque the motor *actually* takes.
-- **Shift cost** — actuation energy per shift, plus a torque interruption charged at the
+- **Shift cost** — derived from the actuator, not typed in: 12 V x 20 A for the 0.5 s a
+  change takes = **120 J per shift**, plus a 0.5 s torque interruption charged at the
   local traction power (zero while braking, where there is no traction to interrupt).
+  Set `actuator_voltage` / `actuator_current` / `actuator_time_s` on `ShiftCost` to match
+  your own hardware.
 - **Schedule constraints** — minimum hysteresis band, minimum acceleration reserve, and
   a cap on the fraction of available acceleration an upshift may give up.
 
@@ -241,13 +246,13 @@ the shift schedule cannot matter however it is chosen.
 
 ## Verification
 
-`verify_model.py` runs 37 checks. Each states a prediction derived independently — a
+`verify_model.py` runs 40 checks. Each states a prediction derived independently — a
 closed form, an analytic identity, or a bound physics requires — and compares. Nothing
 calls the code under test to produce its own expected value.
 
 ```
 A. Physics kernel      road load against closed forms; gearbox identities;
-                       exact pack I²R; map queries at grid nodes; the vectorised
+                       the shift actuation energy; map queries at grid nodes; the vectorised
                        shift controller against a naive per-sample loop; the energy
                        books; reported statistics against their own definitions
 B. Each analysis       envelope geometry; the iso-power identity; the optimal-gear
