@@ -34,8 +34,14 @@ def _find(name: str) -> Path:
     )
 
 
-CYCLE = _find("N603_AMT_onroadrange_SpeedBased_.csv")
-MAP = _find("N603_42UH_230_Fineint_EfficiencyMap.xlsx")
+# Prefer the REAL N603 data when it is present; fall back to the synthetic
+# stand-in so the suite still runs from a checkout that does not have it.
+try:
+    CYCLE = _find("real_data/N603_real_drive_cycle.xlsx")
+    MAP = _find("real_data/N603_real_efficiency_map.xlsx")
+except Exception:
+    CYCLE = _find("N603_AMT_onroadrange_SpeedBased_.csv")
+    MAP = _find("N603_42UH_230_Fineint_EfficiencyMap.xlsx")
 
 cy = M.load_cycle(CYCLE)
 em = M.load_efficiency_map(MAP)
@@ -773,6 +779,39 @@ check("C15b mean_efficiency covers every motoring sample - none are dropped",
       f"worst uncounted motoring energy {1e6*worst_drop*1000:.4f} uWh across "
       f"4 schedules, so the ratio cannot be flattered by exclusion; "
       + ", ".join(f"D={d}: {e:.4%}" for d, e in effs))
+
+section("C16 The efficiency slope is set by the CYCLE, not only the map",
+        "the same map under two cycles must be allowed to produce opposite-sloping "
+        "efficiency curves, because the ratio crossover walks up with load and each "
+        "cycle has its own load mix. effective_crossover() has to answer per band "
+        "with the energy actually flowing, and its bands must account for all of it.")
+
+ec = M.effective_crossover(cy, em, veh=veh, motor=mot, gb=gb, num=num)
+check("C16 the per-band energy shares account for the whole cycle",
+      abs(float(ec["energy_pct"].sum()) - 100.0) < 1e-6 and len(ec) > 5,
+      f"{len(ec)} speed bands summing to {ec['energy_pct'].sum():.6f} %")
+
+# the low ratio must win where the map says it does, and stop winning above it
+lowest = ec.iloc[0]
+highest = ec.iloc[-1]
+check("C16b the low ratio wins at the bottom and loses at the top",
+      lowest["low_ratio_energy_pct"] > 50.0 > highest["low_ratio_energy_pct"]
+      and lowest["low_ratio_gain_pts"] > 0 > highest["low_ratio_gain_pts"],
+      f"{lowest['speed_lo']:.0f}-{lowest['speed_hi']:.0f} km/h: low wins "
+      f"{lowest['low_ratio_energy_pct']:.0f} % of energy ({lowest['low_ratio_gain_pts']:+.1f} pts); "
+      f"{highest['speed_lo']:.0f}-{highest['speed_hi']:.0f}: "
+      f"{highest['low_ratio_energy_pct']:.0f} % ({highest['low_ratio_gain_pts']:+.1f} pts)")
+
+# and the payoff: the region where the low ratio wins must be a small share of
+# the energy, which is the whole reason the downshift threshold cannot matter much
+half = ec[ec["low_ratio_energy_pct"] < 50.0]
+v50 = float(half["speed_lo"].iloc[0]) if len(half) else float("nan")
+share = float(ec[ec["speed_hi"] <= v50]["energy_pct"].sum())
+check("C16c the band where the low ratio wins carries little of the energy",
+      np.isfinite(v50) and share < 25.0,
+      f"low ratio stops winning above {v50:.0f} km/h; everything below carries "
+      f"{share:.1f} % of the motoring energy - which is why no downshift threshold "
+      f"can be worth much")
 
 # ======================================================================= END
 print("\n" + "=" * 78)

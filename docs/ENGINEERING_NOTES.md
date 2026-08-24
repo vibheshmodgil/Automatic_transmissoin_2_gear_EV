@@ -1446,6 +1446,88 @@ about 1.8 Wh and charges about 12.5 Wh in gear changes to collect it.
 Verified by C15 in `verify_model.py` (2 checks). 64/64 pass.
 
 
+## 7s. The real N603 data, and why two cycles over one map slope opposite ways
+
+`Book2.xlsx` arrived with the cycle on Sheet1 and the dyno map on Sheet2. Split into
+`real_data/` and loaded directly. It matches every diagnostic the original notebook
+printed, so the synthetic stand-in of section 6 is retired for anything quantitative:
+
+| | real data |
+|---|---|
+| cycle | 28,368 samples, 28,367 s, **111.35 km**, max 42.26 km/h |
+| map | 42 x 901, peak **94.13 %** at 4260 rpm / 13.0 Nm, 14,091 blank cells |
+
+`load_cycle()` now accepts `.xlsx` as well as `.csv` - that is how the logs actually
+arrive, and the CSV conversion step is where a column gets renamed or a decimal comma
+gets eaten. `verify_model.py` prefers `real_data/` and falls back to the stand-in.
+**All 67 checks pass on the real data.**
+
+### The screenshots were a different cycle
+
+The two photographed panels carry the caption `cycle City cycle.csv (12 km, 0.5 h)`.
+That is not the 111 km N603 log - it is a short dense city cycle. Which cycle is loaded
+is the whole reason the efficiency-vs-downshift curve looked wrong:
+
+| | City cycle (12 km) | real N603 (111 km) |
+|---|---|---|
+| efficiency peaks at downshift | ~15-16 km/h | **7 km/h** |
+| efficiency at D = 4 -> 18 | rises | **falls** (92.01 % -> 91.43 %) |
+
+Same map, opposite slopes, both correct. The reason is that the ratio crossover walks up
+with load - on this map 6.9 km/h at cruise, 21.1 at 0.3 m/s2, 28.3 at 0.6 - and a short
+city cycle spends far more of its low-speed energy accelerating than a long mixed one.
+
+### `effective_crossover()` - ask the cycle, not a nominal load
+
+`ratio_crossover()` gives the map's opinion at a steady load. `effective_crossover()`
+asks which ratio the map prefers **at every motoring sample of the loaded cycle**,
+aggregated per speed band and weighted by the shaft energy in that band - because a band
+the vehicle passes through in two seconds cannot decide anything. On the real N603 cycle:
+
+| band | share of energy | low ratio wins | low ratio gain |
+|---|---|---|---|
+| 4-6 km/h | 0.5 % | 96.9 % | **+3.87 pts** |
+| 6-8 | 0.8 % | 95.2 % | +2.62 |
+| 8-10 | 1.5 % | 89.6 % | +1.20 |
+| **10-12** | 3.1 % | 70.8 % | -1.88 |
+| 12-14 | 7.0 % | 46.6 % | -3.37 |
+| 18-20 | 12.3 % | 31.0 % | -4.54 |
+| 30-32 | 3.4 % | 0.0 % | -6.32 |
+
+**The low ratio stops winning above about 12 km/h, and everything below that carries
+6.2 % of the motoring energy.** That is the downshift threshold's entire playing field.
+Both sweep summaries and the efficiency-only panel now print this table, so the slope is
+explained next to the curve with the loaded cycle's own numbers.
+
+### The answer on the real data
+
+Grid over upshift 8-42, downshift 2-30, minimum band 3 km/h, 120 J + 0.5 s per change:
+
+| | regen off | regen on |
+|---|---|---|
+| best schedule | **18 / 2** | **18 / 2** |
+| net | 9.8503 kWh, 88.5 Wh/km | 9.3062 kWh, 83.6 Wh/km |
+| gear changes | 72 | 72 |
+| always ratio 11 | 9.8437 kWh | 9.2998 kWh |
+| **two-speed box gains** | **-6.6 Wh** | **-6.4 Wh** |
+| oracle prize, free shifting | +48.4 Wh | +56.9 Wh |
+| **oracle prize, charged its own changes** | **-1.3 Wh** | **-22.0 Wh** |
+
+All three searches - upshift sweep, downshift sweep, combined grid - return 18/2 from any
+starting anchor, and the efficiency-only panel's energy optimum is the same point. The
+efficiency optimum is 18/10 at 92.12 %, one grid block away and worth 51.6 Wh more.
+
+> **The conclusion the stand-in reached now holds on the real N603 data: the two-speed box
+> does not pay for itself on energy.** The best schedule is 6.5 Wh *worse* than staying in
+> ratio 11 over 111 km, and even a clairvoyant per-sample controller goes negative once
+> charged for the 1,490-2,366 gear changes it needs. The case for the low ratio remains
+> gradeability and launch (7d, 7f).
+
+Verified by C16 (3 checks): the bands account for 100.000000 % of the motoring energy, the
+low ratio wins at the bottom and loses at the top, and the band where it wins carries under
+a quarter of the energy. 67/67 pass **on the real data**.
+
+
 ## 8. Fix order (first four change the answer)
 
 1. **Enforce `downshift < upshift` in every sweep**, not just the combined grid. This alone deletes the headline result.

@@ -44,7 +44,7 @@ __all__ = [
     "sweep_downshift", "sweep_grid", "sweep_efficiency", "gear_breakdown",
     "wot_run", "wot_sweep", "tractive_force", "road_load_force",
     "oracle_bound", "shift_decomposition", "counterfactual_point",
-    "build_stamp", "accel_capability", "best_by_energy", "fixed_point_thresholds", "sweep_energy_terms", "energy_breakdown", "better_gear_per_sample", "ratio_crossover", "efficiency_ridge", "energy_bins",
+    "build_stamp", "accel_capability", "best_by_energy", "fixed_point_thresholds", "sweep_energy_terms", "energy_breakdown", "better_gear_per_sample", "ratio_crossover", "effective_crossover", "efficiency_ridge", "energy_bins",
 ]
 
 # numpy 1.x / 2.x compatible trapezoid rule (VMI pins numpy==1.26.4)
@@ -341,8 +341,17 @@ _SPEED_ALIASES = ["Speed", "Speed[kmph]", "Speed [km/h]", "Speed[km/h]", "v"]
 
 
 def load_cycle(path) -> CycleData:
+    """Time/speed trace from CSV or Excel.
+
+    Excel is accepted because that is how the real logs arrive - a workbook with
+    the cycle on one sheet and the dyno map on another - and converting to CSV
+    first is a step at which a column gets renamed or a decimal comma gets eaten.
+    """
     path = Path(path)
-    df = pd.read_csv(path)
+    if path.suffix.lower() in (".xlsx", ".xlsm", ".xls"):
+        df = pd.read_excel(path)
+    else:
+        df = pd.read_csv(path)
     df.columns = df.columns.astype(str).str.strip()
 
     def pick(aliases, label):
@@ -880,6 +889,58 @@ def ratio_crossover(emap: EfficiencyMap, accels=(0.0, 0.3, 0.6),
                       delta_at_5=float(d[np.argmin(np.abs(speeds - 5))]),
                       delta_at_15=float(d[np.argmin(np.abs(speeds - 15))]))
     return out
+
+
+def effective_crossover(cycle: CycleData, emap: EfficiencyMap, veh: Vehicle = None,
+                        motor: Motor = None, gb: Gearbox = None,
+                        num: Numerics = None, speed_step: float = 2.0) -> pd.DataFrame:
+    """Which ratio wins per speed band ON THIS CYCLE, weighted by energy.
+
+    ``ratio_crossover`` answers the question for a steady load. A real cycle is
+    not a steady load, and the crossover walks up strongly with it - which is why
+    two cycles over the SAME map produce opposite-looking efficiency curves and
+    the tool appears to contradict itself. A dense city cycle spends much of its
+    low-speed energy accelerating, where the low ratio is the better one well past
+    the cruise crossover; a long cycle with more steady running does not.
+
+    So this asks the cycle rather than a nominal load: for every motoring sample,
+    which ratio the map prefers AT THAT sample, aggregated per speed band and
+    weighted by the shaft energy in the band - because a band the vehicle passes
+    through in two seconds cannot decide anything.
+
+    Returns per-band: energy share, the share of that energy where the LOW ratio
+    wins, and the mean efficiency advantage of the low ratio.
+    """
+    veh = veh or Vehicle(); motor = motor or Motor(); gb = gb or Gearbox()
+    num = num or Numerics()
+    G = _both_gears(cycle, emap, veh, motor, gb, num)
+    d1, d2 = G[1], G[2]
+    mot = d2["active"] & (d2["p_wheel"] > 0)
+    e1 = np.where(np.isfinite(d1["eff"]), d1["eff"], np.nan)
+    e2 = np.where(np.isfinite(d2["eff"]), d2["eff"], np.nan)
+    ok = mot & np.isfinite(e1) & np.isfinite(e2)
+
+    dt = np.gradient(cycle.time)
+    energy = np.where(ok, d2["p_wheel"] * dt, 0.0)      # shaft-side weight
+    low_wins = ok & (e1 > e2)
+
+    v = cycle.speed_kmh
+    edges = np.arange(0.0, np.ceil(v.max() / speed_step) * speed_step + speed_step,
+                      speed_step)
+    rows = []
+    tot = energy.sum()
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        m = ok & (v >= lo) & (v < hi)
+        e = energy[m].sum()
+        if e <= 0:
+            continue
+        rows.append(dict(
+            speed_lo=lo, speed_hi=hi,
+            energy_kwh=e / 3.6e6,
+            energy_pct=100.0 * e / tot if tot > 0 else np.nan,
+            low_ratio_energy_pct=100.0 * energy[m & low_wins].sum() / e,
+            low_ratio_gain_pts=100.0 * float(np.nanmean((e1 - e2)[m]))))
+    return pd.DataFrame(rows)
 
 
 def optimal_gear_map(emap: EfficiencyMap, speed_range=(2.0, 42.0), accel_range=(-0.2, 1.4),

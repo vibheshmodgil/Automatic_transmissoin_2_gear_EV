@@ -2894,6 +2894,36 @@ class ShiftOptimiserApp(ctk.CTk):
                        else p["gb"].ratio_2)
                 L.append(f"      at {a:.1f} m/s2 accel : ratio {who:g} is better at "
                          f"every speed searched")
+        # The steady-load numbers above are the map's opinion. What decides the
+        # curve is the load mix of THIS cycle, so ask the cycle too - this is why
+        # the same map under a dense city cycle and under a long mixed cycle
+        # produces efficiency curves that slope opposite ways.
+        try:
+            ec = sc.effective_crossover(self.cycle, self.emap, veh=p["veh"],
+                                        motor=p["motor"], gb=p["gb"], num=p["num"])
+        except Exception:
+            ec = None
+        if ec is not None and len(ec):
+            half = ec[ec["low_ratio_energy_pct"] < 50.0]
+            v50 = float(half["speed_lo"].iloc[0]) if len(half) else float("nan")
+            below = ec[ec["speed_hi"] <= (v50 if np.isfinite(v50) else 0)]
+            share = float(below["energy_pct"].sum()) if len(below) else 0.0
+            L += ["", "    On THIS cycle, weighted by the energy actually flowing:",
+                  f"      {'band':>12}{'energy':>9}{'low ratio wins':>16}"
+                  f"{'low gain':>11}"]
+            for _, r in ec.iterrows():
+                if r["energy_pct"] < 0.4:
+                    continue
+                L.append(f"      {r['speed_lo']:4.0f}-{r['speed_hi']:<7.0f}"
+                         f"{r['energy_pct']:7.1f}%{r['low_ratio_energy_pct']:14.1f}%"
+                         f"{r['low_ratio_gain_pts']:+10.2f} pts")
+            if np.isfinite(v50):
+                L += ["",
+                      f"    The low ratio stops winning above about {v50:.0f} km/h on this",
+                      f"    cycle, and everything below that carries only {share:.1f} % of the",
+                      "    motoring energy. So raising the downshift towards that speed",
+                      "    lifts mean efficiency, and past it the curve turns over -",
+                      "    which is exactly the shape you should see in the sweep."]
         finite = [r["crossover_kmh"] for r in cr.values()
                   if np.isfinite(r["crossover_kmh"])]
         if finite:

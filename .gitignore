@@ -11,6 +11,7 @@ shift_study_report.body.html
 N603_two_speed_shift_sweep_results.csv
 
 # the canonical copies of the sample data live in sample_data/
+# real N603 data lives in real_data/
 /N603_AMT_onroadrange_SpeedBased_.csv
 /N603_42UH_230_Fineint_EfficiencyMap.xlsx
 
