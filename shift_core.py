@@ -44,7 +44,7 @@ __all__ = [
     "sweep_downshift", "sweep_grid", "sweep_efficiency", "gear_breakdown",
     "wot_run", "wot_sweep", "tractive_force", "road_load_force",
     "oracle_bound", "shift_decomposition", "counterfactual_point",
-    "accel_capability", "best_by_energy", "fixed_point_thresholds", "sweep_energy_terms", "energy_breakdown", "better_gear_per_sample", "efficiency_ridge", "energy_bins",
+    "build_stamp", "accel_capability", "best_by_energy", "fixed_point_thresholds", "sweep_energy_terms", "energy_breakdown", "better_gear_per_sample", "efficiency_ridge", "energy_bins",
 ]
 
 # numpy 1.x / 2.x compatible trapezoid rule (VMI pins numpy==1.26.4)
@@ -172,6 +172,43 @@ class Numerics:
     min_efficiency: float = 0.01
     smooth_window: int = 0          # P6 - Savitzky-Golay window (odd, 0 = off)
     smooth_order: int = 2
+
+
+# ---------------------------------------------------------------------------
+# Build identity
+# ---------------------------------------------------------------------------
+VERSION = "2026-08-24"
+
+
+def build_stamp() -> str:
+    """Which build produced a given piece of output.
+
+    Every summary prints this. Without it there is no way to tell a stale run
+    from a current one by looking at the text, and a report pasted into an email
+    outlives the code it came from - which has already cost this project several
+    rounds of debugging output that no longer matched the source.
+
+    Reads .git directly rather than shelling out to git, so it works from a
+    plain ZIP download too (it just reports no commit).
+    """
+    head = ""
+    try:
+        g = Path(__file__).resolve().parent / ".git"
+        ref = (g / "HEAD").read_text(encoding="utf-8").strip()
+        if ref.startswith("ref: "):
+            tgt = g / ref[5:]
+            if tgt.exists():
+                head = tgt.read_text(encoding="utf-8").strip()[:7]
+            else:                                  # packed refs
+                for line in (g / "packed-refs").read_text(encoding="utf-8").splitlines():
+                    if line.endswith(" " + ref[5:]):
+                        head = line.split()[0][:7]
+                        break
+        else:
+            head = ref[:7]
+    except Exception:
+        pass
+    return f"shift_core {VERSION}" + (f" (build {head})" if head else " (no git info)")
 
 
 # ---------------------------------------------------------------------------
@@ -927,14 +964,46 @@ def _finish(rows, details, values, edge_label):
                      f"[{tied.min():g}, {tied.max():g}] km/h - the threshold has no "
                      f"effect there (it never changes the gear sequence); reporting "
                      f"the midpoint {probe:g}")
-    # only a SINGLE-point optimum sitting on an edge means the search was too narrow
-    at_edge = (step > 0 and len(tied) == 1
-               and (abs(probe - v.min()) <= step / 2 or abs(probe - v.max()) <= step / 2))
-    if at_edge:
+
+    on_edge = step > 0 and (abs(probe - v.min()) <= step / 2
+                            or abs(probe - v.max()) <= step / 2)
+    at_edge = False
+    if on_edge:
         which = "lower" if abs(probe - v.min()) <= step / 2 else "upper"
-        notes.append(f"optimum {probe:g} km/h sits on the {which} edge of the searched "
-                     f"range [{v.min():g}, {v.max():g}] - widen the range; this is not "
-                     f"an interior optimum")
+        # Sitting on an edge is only a BOUNDARY PROBLEM if the objective is still
+        # falling as it gets there. Exact ties almost never occur on real data -
+        # every candidate differs in the last digit - so testing for them declared
+        # a search failed whenever a flat curve happened to bottom out at an edge,
+        # which is the common case and is not a failure at all. Test the slope
+        # instead: if the neighbour one step inside is within the indifference
+        # tolerance, the curve is flat here and widening buys nothing measurable.
+        e_all = np.array([_objective(r) for r in ok], dtype=float)
+        thr_all = np.array([getattr(r, edge_label) for r in ok], dtype=float)
+        order = np.argsort(thr_all)
+        e_sorted, t_sorted = e_all[order], thr_all[order]
+        tol = abs(e_sorted.min()) * _INDIFF_REL
+        flat_run = [t for t, e in zip(t_sorted, e_sorted) if e <= e_sorted.min() + tol]
+        touches = (abs(min(flat_run) - v.min()) <= step / 2 + 1e-9 if which == "lower"
+                   else abs(max(flat_run) - v.max()) <= step / 2 + 1e-9)
+        # Two adjacent points being close is not a flat curve - every smooth curve
+        # is flat over one step near its minimum. Require a real plateau: at least
+        # three candidates spanning at least two steps, or the whole range.
+        wide = (len(flat_run) >= 3
+                and (max(flat_run) - min(flat_run)) >= 2 * step - 1e-9)
+        neighbour_flat = touches and (wide or len(flat_run) == len(t_sorted))
+        if neighbour_flat:
+            notes.append(
+                f"optimum {probe:g} km/h is on the {which} edge of "
+                f"[{v.min():g}, {v.max():g}], but the objective is FLAT to that edge - "
+                f"{len(flat_run)} candidates over [{min(flat_run):g}, {max(flat_run):g}] "
+                f"km/h lie within {1000*tol:.1f} Wh of the best, so this is a flat "
+                f"objective, not too narrow a search")
+        else:
+            at_edge = True
+            notes.append(f"optimum {probe:g} km/h sits on the {which} edge of the "
+                         f"searched range [{v.min():g}, {v.max():g}] and the objective "
+                         f"is still falling towards it - widen the range; this is not "
+                         f"an interior optimum")
     return SweepResult(table, best, not at_edge, "; ".join(notes), details)
 
 
@@ -1048,15 +1117,30 @@ def sweep_grid(cycle, emap, up_lo=20.0, up_hi=42.0, up_step=1.0,
                      f"(upshift {min(r.upshift for r in tied):g}-{max(r.upshift for r in tied):g}, "
                      f"downshift {min(r.downshift for r in tied):g}-{max(r.downshift for r in tied):g})"
                      f" - the choice is degenerate over that block")
-    if len(tied) == 1 and (abs(best.upshift - u.min()) < up_step / 2
-                           or abs(best.upshift - u.max()) < up_step / 2):
-        notes.append(f"upshift {best.upshift:g} on the edge of [{u.min():g}, {u.max():g}]")
-    if len(tied) == 1 and (abs(best.downshift - d.min()) < dn_step / 2
-                           or abs(best.downshift - d.max()) < dn_step / 2):
-        notes.append(f"downshift {best.downshift:g} on the edge of [{d.min():g}, {d.max():g}]")
+    # Same correction as _finish: an edge optimum is a boundary PROBLEM only when
+    # the objective is still falling towards that edge. Exact ties are rare on real
+    # data, so testing len(tied) == 1 flagged almost every flat curve as a failed
+    # search. Test flatness at the edge instead.
+    e_all = np.array([_objective(r) for r in ok], dtype=float)
+    tol = abs(e_all.min()) * _INDIFF_REL
+    flat = [r for r, x in zip(ok, e_all) if x <= e_all.min() + tol]
+    for lab, val, arr, st_ in (("upshift", best.upshift, u, up_step),
+                               ("downshift", best.downshift, d, dn_step)):
+        if not (abs(val - arr.min()) < st_ / 2 or abs(val - arr.max()) < st_ / 2):
+            continue
+        vals = [getattr(r, lab) for r in flat]
+        wide = len(set(vals)) >= 3 and (max(vals) - min(vals)) >= 2 * st_ - 1e-9
+        if wide or len(flat) == len(ok):
+            notes.append(f"{lab} {val:g} on the edge of [{arr.min():g}, {arr.max():g}] "
+                         f"but FLAT there - {len(flat)} candidates within "
+                         f"{1000*tol:.1f} Wh span {lab} "
+                         f"[{min(vals):g}, {max(vals):g}]")
+        else:
+            notes.append(f"{lab} {val:g} on the edge of "
+                         f"[{arr.min():g}, {arr.max():g}] and still falling")
     if abs((best.upshift - best.downshift) - min_band) < 1e-9:
         notes.append(f"band width pinned at the {min_band:g} km/h minimum")
-    edge = any("on the edge" in n or "pinned" in n for n in notes)
+    edge = any("still falling" in n or "pinned" in n for n in notes)
     return SweepResult(table, best, not edge,
                        "; ".join(notes) + (" - widen the range" if edge else ""), details)
 

@@ -1253,6 +1253,67 @@ optimum with the shift term accounting for the gap. 56/56 pass.
 > not noise, and C12b asserts the correlation rather than a false proportionality.
 
 
+## 7p. "Never converged", and a build stamp so stale output announces itself
+
+### The output was three builds old
+
+The same summary was reported three times as evidence of new problems. It could not have
+come from the current code: it says `Sweep over upshift` above the 645-candidate
+two-threshold grid (fixed in 6fbd403), prints `-12 % of the gain is lower motor loss`
+(fixed in 6fbd403), lacks the `ANCHOR:` block (added in 6fbd403), and contains no
+`Loss breakdown` at all (added in 6b0b837) - which is also why that analysis appeared "not
+working": it was not in the build being run.
+
+**Fix, so this cannot recur:** `shift_core.build_stamp()` reads `.git/HEAD` directly (no
+subprocess, so a ZIP download works too) and every summary now carries it as its second
+line, as does the window title:
+
+```
+Sweep over downshift
+==========================================================================
+  shift_core 2026-08-24 (build 6b0b837)
+```
+
+Any output pasted anywhere now names the code that produced it.
+
+### The one real defect in that output: CONVERGED was lying
+
+`CONVERGED : False` with `optimum 4 km/h sits on the lower edge - widen the range`, printed
+directly above `5 of 16 feasible candidates are within 1.1 Wh (0.1 %) of the best, spanning
+downshift 4-8`. Both cannot be true. If five candidates including the edge are
+indistinguishable, the search did not fail - the objective is flat.
+
+The cause: `_finish()` tested `len(tied) == 1`, where `tied` means **bit-identical** energy
+(`_TIE_REL = 1e-9`). On the synthetic data whole blocks tie exactly, so the test worked. On
+real data nothing ever ties exactly - every candidate differs in the last digit - so
+`len(tied) == 1` is always true and **every** edge optimum was declared a failed search.
+That is the common case on real data and it is not a failure.
+
+An edge optimum is a boundary problem only if **the objective is still falling towards that
+edge**. Both `_finish()` and `sweep_grid()` now test that instead:
+
+| case | verdict |
+|---|---|
+| upshift [18, 22], 5 candidates within 9.9 Wh spanning the range | **converged** - "FLAT to that edge, not too narrow a search" |
+| upshift [24, 42], only 2 candidates close, curve rising away | **NOT converged** - "still falling towards it - widen the range" |
+| upshift [8, 42], interior optimum | converged, no note |
+
+A plateau has to be real to count: at least three candidates spanning at least two steps,
+or the whole range. Two adjacent points being close is not a flat curve - every smooth
+curve is flat over one step near its minimum, and accepting that would have turned the
+warning off everywhere.
+
+### On "different analysis, different results"
+
+Already answered by 7l (one cost model, indifference band) and 7n (fixed-point anchor); the
+output above predates both. With the current build, on the same data, the two 1-D sweeps
+and the grid return the same pair from any starting threshold - C11 asserts it.
+
+Verified by C13 in `verify_model.py` (5 checks): flat-to-edge converges, still-falling does
+not, an interior optimum is clean, a two-point run does not count as a plateau, and every
+summary can name its build. 61/61 pass.
+
+
 ## 8. Fix order (first four change the answer)
 
 1. **Enforce `downshift < upshift` in every sweep**, not just the combined grid. This alone deletes the headline result.

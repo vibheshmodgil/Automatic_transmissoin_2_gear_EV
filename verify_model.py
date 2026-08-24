@@ -677,6 +677,40 @@ check("C12c peak efficiency is not least energy, and the shift term is why",
       f"({int(tb['shifts'].iloc[i_e])} changes -> {int(tb['shifts'].iloc[i_b])}), "
       f"net {d_motor + d_shift:+.1f} Wh")
 
+section("C13 Convergence must mean what it says",
+        "an optimum on the edge of the search range is a BOUNDARY PROBLEM only when "
+        "the objective is still falling towards it. Exact ties almost never occur on "
+        "real data - every candidate differs in the last digit - so testing for them "
+        "declared a search failed whenever a flat curve happened to bottom out at an "
+        "edge, which is the common case and no failure at all.")
+
+flat_edge = M.sweep_upshift(cy, em, 7, 18, 22, 1, **Pc)
+falling = M.sweep_upshift(cy, em, 7, 24, 42, 1, **Pc)
+interior = M.sweep_upshift(cy, em, 7, 8, 42, 1, **Pc)
+check("C13 a flat curve bottoming at an edge is NOT a failed search",
+      flat_edge.converged and "FLAT" in flat_edge.boundary_note,
+      f"upshift [18, 22]: best {flat_edge.best.upshift:g}, converged - "
+      f"{flat_edge.boundary_note[:88]}")
+check("C13b a curve still falling towards an edge still IS one",
+      not falling.converged and "still falling" in falling.boundary_note,
+      f"upshift [24, 42]: best {falling.best.upshift:g}, NOT converged")
+check("C13c an interior optimum is clean either way",
+      interior.converged and not interior.boundary_note,
+      f"upshift [8, 42]: best {interior.best.upshift:g}, converged, no note")
+
+# two adjacent points being close is not a plateau; every smooth curve is flat
+# over one step near its minimum
+e_f = np.array([M._objective(d) for d in falling.details if d.feasible])
+n_close = int(np.sum(e_f <= e_f.min() + abs(e_f.min()) * M._INDIFF_REL))
+check("C13d a two-point flat run at an edge does not count as a plateau",
+      n_close < 3 and not falling.converged,
+      f"{n_close} candidates within tolerance at the [24, 42] edge - under the "
+      f"3-candidate, 2-step minimum for a real plateau, so it is reported as falling")
+
+check("C13e every summary can name the build that produced it",
+      M.build_stamp().startswith("shift_core ") and len(M.build_stamp()) > 12,
+      M.build_stamp())
+
 # ======================================================================= END
 print("\n" + "=" * 78)
 n_fail = sum(1 for *_, ok, _ in [(s, n, o, d) for s, n, o, d in RESULTS] if not ok)

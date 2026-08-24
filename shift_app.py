@@ -162,7 +162,7 @@ POINT_MODES = ["motoring / braking",
 class ShiftOptimiserApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Two-Speed Shift Optimiser")
+        self.title("Two-Speed Shift Optimiser  -  " + sc.build_stamp())
         self.geometry("1500x950")
         self.minsize(1180, 760)
         ctk.set_appearance_mode("light")
@@ -2087,7 +2087,8 @@ class ShiftOptimiserApp(ctk.CTk):
 
     def _lossshare_summary(self, out):
         NL = chr(10)
-        L = ["Loss breakdown - what each threshold actually buys", "=" * 74, "",
+        L = ["Loss breakdown - what each threshold actually buys", "=" * 74,
+             "  " + sc.build_stamp(), "",
              "  Anchored at the self-consistent pair "
              + format(out["held_up"], "g") + "/" + format(out["held_dn"], "g")
              + " km/h, so the two",
@@ -2282,7 +2283,8 @@ class ShiftOptimiserApp(ctk.CTk):
         NL = chr(10)
         full = sw.table          # every candidate tried, rejected ones included
         lo, hi = df["mean_efficiency"].min(), df["mean_efficiency"].max()
-        L = ["Shift schedule ranked on MOTOR EFFICIENCY alone", "=" * 74, "",
+        L = ["Shift schedule ranked on MOTOR EFFICIENCY alone", "=" * 74,
+             "  " + sc.build_stamp(), "",
              "  mean_efficiency = shaft output energy / electrical input energy over",
              "  the motoring samples. The auxiliary load, the shift actuation energy",
              "  and the torque interruption all cancel out of",
@@ -2754,7 +2756,8 @@ class ShiftOptimiserApp(ctk.CTk):
 
     # -------------------------------------------------------------- summaries
     def _summary(self, r):
-        L = [f"Strategy: upshift {r.upshift:g} / downshift {r.downshift:g} km/h", "=" * 74,
+        L = [f"Strategy: upshift {r.upshift:g} / downshift {r.downshift:g} km/h",
+             "=" * 74, "  " + sc.build_stamp(),
              f"  consumed            {r.consumed_kwh:10.4f} kWh",
              f"  specific            {r.wh_per_km:10.1f} Wh/km over {r.distance_km:.1f} km",
              f"  recovered           {r.recovered_kwh:10.4f} kWh"
@@ -2853,7 +2856,7 @@ class ShiftOptimiserApp(ctk.CTk):
         j = (self._f("cost", "actuator_voltage", 12.0)
              * self._f("cost", "actuator_current", 20.0)
              * self._f("cost", "actuator_time_s", 0.5))
-        L = [f"Sweep over {col}", "=" * 74,
+        L = [f"Sweep over {col}", "=" * 74, "  " + sc.build_stamp(),
              f"  each gear change costs {j:.0f} J at the actuator "
              f"({self._f('cost','actuator_voltage',12):g} V x "
              f"{self._f('cost','actuator_current',20):g} A x "
