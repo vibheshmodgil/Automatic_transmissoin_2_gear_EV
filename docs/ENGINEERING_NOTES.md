@@ -1587,6 +1587,79 @@ efficiency peak stays fixed, charging more per shift never lowers the energy, an
 span is under 0.30 % of the cycle. 70/70 pass on the real data.
 
 
+## 7u. Reading the Loss breakdown, and where every input lives
+
+### The five terms
+
+Every watt-hour drawn from the pack lands in exactly one of these. They are computed by
+`energy_breakdown()` and they sum to `consumed` by construction (C10d verifies it to
+-0.0 Wh). On the real N603 cycle at 18/2 with regen on:
+
+| term | kWh | share | what it is | what sets it |
+|---|---|---|---|---|
+| **road work** | 7.7166 | 79.3 % | the work the road actually demands - inertia, rolling, aero, grade | **Vehicle**: Mass, Cd x A, Crr, Road grade, Wheel radius (plus **Motor** > Rotor inertia, which is gear-dependent) |
+| **gearbox loss** | 0.2387 | 2.5 % | mesh loss between motor and wheel | **Gearbox**: Efficiency gear 1 / gear 2 |
+| **MOTOR loss** | 0.6956 | 7.1 % | what the efficiency map costs at the operating points the schedule creates | the map itself, plus **Gearbox** ratios and the **Thresholds** - this is the only term a shift schedule can move |
+| **auxiliary** | 1.1820 | 12.1 % | constant hotel load x cycle duration | **Electrical** > **Auxiliary load [W]** |
+| **shift actuator + cut** | 0.0176 | 0.2 % | 120 J per change, plus traction lost while the actuator moves | **Shift cost** > Actuator voltage, Actuator current, Shift duration |
+| = consumed | 9.7367 | 100 % | | |
+| recovered (regen) | -0.4305 | | what the motor puts back while braking | **Regen** section |
+| **= NET** | **9.3062** | | **83.6 Wh/km over 111 km - the objective** | |
+
+**Two things fall straight out of that table and neither is about shifting.**
+
+The auxiliary load is **1.70x the entire motor loss**. 150 W for 7.88 h costs 1.18 kWh
+against 0.70 kWh for every inefficiency in the motor at every operating point of the cycle.
+Halving the hotel load is worth about ten times more than any shift schedule.
+
+The shift cost is **0.18 % of consumed**. It decides the threshold (7t) and nothing else.
+
+### The panels
+
+Two columns - upshift sweep, downshift sweep - both anchored at the self-consistent pair
+(7n), so they are slices through one operating point rather than two unrelated searches.
+
+**Row 1 - share of the losses.** The four loss terms stacked. Road work is deliberately
+excluded and its value put in the title: at ~7,800 Wh it is 8x every loss combined and
+barely moves with the threshold, so stacking it flattens everything that does. Watch the
+green band - that is the shift cost, and it grows with the threshold.
+
+**Row 2 - the trade, and the panel that answers the recurring question.** Shift cost
+against motor loss *above its own minimum*, on one axis, with the gear-change count as
+bars behind. Whichever curve is higher decides the answer. Dashed vertical line = the
+energy optimum, dotted = the efficiency optimum. When they are apart, this panel is why.
+
+**Row 3 - the two optima side by side.** Net energy (black, left axis) and mean motor
+efficiency (red, right axis), each with its own optimum marked. The dot and the cross
+being at different x is not a fault - see 7o and 7t.
+
+### Where every input lives
+
+Left panel of the app, top to bottom. `Run analysis` re-simulates; the display controls
+below only redraw the cached result.
+
+| section | fields |
+|---|---|
+| **Vehicle** | Mass [kg], Wheel radius [m], Cd x A [m^2], Rolling resistance Crr, Road grade [deg] |
+| **Motor** | Peak torque [Nm], Peak power [W], Max speed [rpm], Rotor inertia [kg.m^2] |
+| **Gearbox** | Ratio 1 (low), Ratio 2 (high), Efficiency gear 1, Efficiency gear 2 |
+| **Electrical** | Pack voltage [V], **Auxiliary load [W]**, Battery power limit [W] |
+| **Regen** | Regen enabled (0/1), Brake torque to motor [0-1], Charge power limit [W], Blend out below [km/h] |
+| **Shift cost** | Actuator voltage [V], Actuator current [A], Shift duration [s], Max shifts per hour, Min hysteresis band [km/h], Min accel reserve [m/s2], Max accel given up [0-1] |
+| **Thresholds** | Upshift [km/h], Downshift [km/h] - the single-strategy pair, and the starting anchor for the sweeps |
+| **Sweep range** | Upshift from/to, Downshift from/to, Step, Minimum band |
+| **Energy bins** | Bin size [rpm], Bin size [Nm], Reference (0=g1, 1=g2, 2=custom), Compare upshift/downshift |
+| **Acceleration run** | Target speed [km/h], Throttle [0-1] |
+| **Numerics** | Smoothing window (0=off) - the error-bar control of C7 |
+
+Below the parameters, the display controls: **SWEEP ANCHOR** (self-consistent anchor, 7n),
+**SIGNALS**, **TIME WINDOW**, **EFFICIENCY-MAP DISPLAY**, and the **Plot height** slider.
+None of those change a number - they only change what is drawn.
+
+**So: auxiliary load is Electrical > Auxiliary load [W], default 150.** It is the second
+largest term in the whole budget and the one nobody has questioned yet.
+
+
 ## 8. Fix order (first four change the answer)
 
 1. **Enforce `downshift < upshift` in every sweep**, not just the combined grid. This alone deletes the headline result.
