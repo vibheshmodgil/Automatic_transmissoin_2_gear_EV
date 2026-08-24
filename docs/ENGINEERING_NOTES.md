@@ -1044,6 +1044,86 @@ should be set on shift count and driveability, and 7-9 km/h keeps the band wide 
 sitting in the flat region.
 
 
+## 7m. The shift cost has to reach every view - including the ceiling
+
+Asked directly: *is the shift loss in the efficiency-map analyses too? it will definitely
+be there.* It was not, in the one place it mattered most, and the omission was inverting
+the study's headline claim.
+
+### The audit
+
+| view | uses the cycle? | carries the shift cost |
+|---|---|---|
+| Single strategy, all three sweeps, Efficiency-only, Points on map, Shift movement | yes | yes |
+| Acceleration run | yes | yes (`interrupt_s` of zero traction + `energy_per_shift`) |
+| Energy bins | yes | **in the totals, not in the cells** - see below |
+| **`oracle_bound()` - the CEILING in every sweep summary** | yes | **no. Fixed.** |
+| Efficiency map, Gear comparison, Gradeability, Optimal gear map | no cycle, no schedule | nothing to charge |
+
+### The defect: a free-shifting ceiling quoted against cost-paying schedules
+
+Every sweep summary prints the oracle - the better ratio chosen at every sample with
+perfect foresight - as the bound on the whole optimisation. It was computed with shifting
+free while the schedules beside it paid 120 J and 0.5 s per change. Not comparable, and it
+flattered the oracle enormously, because **reaching that number takes 1,610 gear changes**:
+
+| strategy | net kWh | gear changes |
+|---|---|---|
+| always the low ratio | 10.2443 | 0 |
+| always the high ratio | **9.8765** | 0 |
+| best real schedule 18/7 | 9.8841 | 62 |
+| perfect per-sample choice, free shifting | 9.8321 | 1,610 |
+| **the same, charged its own actuator energy** | **9.8858** | 1,610 |
+
+1,610 x 120 J = **53.7 Wh of actuator against a 44.4 Wh prize.** The prize goes from
++44.4 Wh to **-9.3 Wh**: clairvoyant per-sample gear selection loses to simply staying in
+ratio 11. And that is the generous reading - only the actuator is charged, never the
+1,610 x 0.5 s of lost traction, which keeps `oracle_charged` a true lower bound on what
+per-sample selection costs.
+
+`oracle_bound()` now returns `oracle_shifts`, `oracle_shift_wh`, `oracle_charged` and
+`prize_charged_wh`, and the CEILING block prints a gear-change count on every row - which
+is what makes the rows comparable at all. The single-ratio baselines make zero changes and
+so pay nothing; that is the correct comparison, not an omission.
+
+### The conclusion this changes
+
+Section 7e found the second ratio worth 0.2 Wh over 110 km - indistinguishable from zero,
+with free shifting. Charge the hardware and it goes **negative**: the best schedule
+(18/7, 62 changes, 19.2 Wh of shift cost) is **-7.6 Wh against just staying in ratio 11**.
+
+> **The two-speed box does not pay for itself on this duty at any shift schedule, and now
+> the ceiling says why: the ratio choice cannot pay for the act of changing ratio.**
+> The case for gear 1 remains gradeability and launch (7d, 7f), not energy.
+
+### Where the cost cannot be drawn, and why
+
+The **Energy bins** view maps (rpm, torque) cells of the motor. The actuator runs off its
+own 12 V supply and the traction cut is the *absence* of an operating point, so neither has
+a cell to live in. Rather than let the totals silently disagree with every other view, the
+panel now reconciles them:
+
+```
+  binned into cells        8.6800 kWh   (traction only)
+  auxiliary load           1.1820 kWh   (no rpm, no torque)
+  shift actuator + cut     0.0528 kWh   (136 changes)
+                           ---------
+  consumed (headline)      9.9148 kWh
+```
+
+C10d verifies that identity closes to **-0.0 Wh**.
+
+**Optimal gear map** is drawn from the efficiency map alone: it says which ratio is better
+*at* a point and is silent on what changing to it costs. A controller tracking that
+boundary exactly *is* the oracle - ~1,600 changes. The panel now says so, so the map is
+read as where a 2-D schedule could help, never as a controller.
+
+Verified by C10 in `verify_model.py` (5 checks): the oracle is priced for its own changes,
+charging can never flatter it, the single-ratio baselines pay nothing, consumed reconciles
+against binned + aux + shift, and the penalty is exactly proportional to the change count.
+49/49 pass.
+
+
 ## 8. Fix order (first four change the answer)
 
 1. **Enforce `downshift < upshift` in every sweep**, not just the combined grid. This alone deletes the headline result.

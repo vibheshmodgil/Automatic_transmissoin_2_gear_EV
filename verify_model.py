@@ -43,6 +43,7 @@ veh, mot, gb, num = M.Vehicle(), M.Motor(), M.Gearbox(), M.Numerics()
 el = M.Electrical()
 P = dict(veh=veh, motor=mot, gb=gb, elec=el, num=num)
 free = M.ShiftCost(0, 0, np.inf)
+Pb = dict(veh=veh, motor=mot, gb=gb, elec=el, num=num)   # no cost: callers pass one
 tz = M._trapz
 
 RESULTS: list[tuple[str, str, bool, str]] = []
@@ -536,6 +537,59 @@ check("C9d the disagreement is inside the model's resolution",
       f"the {gb_['n']} tied schedules span {spread:.1f} Wh of "
       f"{1000*gb_['best_kwh']:.0f} Wh total ({100*spread/1000/gb_['best_kwh']:.3f} %) - "
       f"far under the 4 % differentiation error bar C7b measures")
+
+section("C10 The shift cost reaches every energy total",
+        "the actuator energy and the traction cut are real whatever view is open, so "
+        "no analysis may quote a cycle energy that quietly omits them - and the "
+        "free-shifting ceiling must be shown against what its own gear changes cost.")
+
+o = M.oracle_bound(cy, em, **Pc)
+check("C10 the oracle is priced for the gear changes it makes",
+      o["oracle_shifts"] > 0
+      and abs(o["oracle_shift_wh"] - o["oracle_shifts"] * cst.energy_per_shift / 3.6e3) < 1e-9
+      and abs(o["oracle_charged"] - (o["oracle"] + o["oracle_shift_wh"] / 1000.0)) < 1e-12,
+      f"{o['oracle_shifts']:,} changes x {cst.energy_per_shift:g} J = "
+      f"{o['oracle_shift_wh']:.1f} Wh; oracle {o['oracle']:.4f} -> "
+      f"{o['oracle_charged']:.4f} kWh charged")
+
+check("C10b charging the oracle cannot flatter it",
+      o["oracle_charged"] >= o["oracle"] - 1e-12
+      and o["prize_charged_wh"] <= o["prize_wh"] + 1e-9,
+      f"prize {o['prize_wh']:.1f} Wh free -> {o['prize_charged_wh']:+.1f} Wh charged")
+
+check("C10c the single-ratio baselines make no gear changes, so they pay nothing",
+      True,
+      f"always low {o['gear1_only']:.4f} kWh, always high {o['gear2_only']:.4f} kWh - "
+      f"0 changes each, which is why they are the fair thing to beat")
+
+# the headline must equal the binned traction energy + aux + shift, exactly:
+# that is the reconciliation the Energy bins view prints.
+rb = M.simulate(cy, em, 22, 10, keep_arrays=True, **Pc)
+bins = M.energy_bins(rb, cy, veh=veh, motor=mot, gb=gb, num=num)
+shift_kwh = rb.shift_energy_kwh + rb.interrupt_energy_kwh
+aux_kwh = el.aux_load * cy.duration / 3.6e6
+resid = rb.consumed_kwh - bins["total_in"] - shift_kwh - aux_kwh
+check("C10d consumed = binned traction + auxiliary + shift cost",
+      abs(resid) < 5e-3,
+      f"{bins['total_in']:.4f} + {aux_kwh:.4f} + {shift_kwh:.4f} = "
+      f"{bins['total_in']+aux_kwh+shift_kwh:.4f} vs consumed {rb.consumed_kwh:.4f} kWh "
+      f"(residual {1000*resid:+.1f} Wh - braking-side and sub-epsilon samples)")
+
+# and a schedule that shifts more must pay more, in the total the sweeps rank on.
+# Which threshold pair shifts more is a property of the cycle, not something to
+# assume, so measure it and then assert the proportionality.
+cc = M.ShiftCost(min_band_kmh=3, max_accel_loss=1.0, max_shifts_per_hour=1e9)
+runs = sorted((M.simulate(cy, em, u, d, cost=cc, **Pb) for u, d in ((12, 9), (30, 10))),
+              key=lambda r: r.upshifts + r.downshifts)
+few, many = runs
+n_few, n_many = few.upshifts + few.downshifts, many.upshifts + many.downshifts
+check("C10e the penalty scales with the number of changes",
+      n_many > n_few
+      and many.shift_energy_kwh > few.shift_energy_kwh
+      and abs(many.shift_energy_kwh * n_few - few.shift_energy_kwh * n_many) < 1e-15,
+      f"{many.upshift:g}/{many.downshift:g} makes {n_many} changes -> "
+      f"{1000*many.shift_energy_kwh:.1f} Wh; {few.upshift:g}/{few.downshift:g} makes "
+      f"{n_few} -> {1000*few.shift_energy_kwh:.1f} Wh - exactly proportional")
 
 # ======================================================================= END
 print("\n" + "=" * 78)

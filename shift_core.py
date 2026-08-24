@@ -1262,9 +1262,29 @@ def oracle_bound(cycle: CycleData, emap: EfficiencyMap, veh: Vehicle = None,
 
     If that prize is small, the shift schedule cannot matter however it is chosen,
     and the search is over before it starts.
+
+    But a free-shifting ceiling quoted next to schedules that pay 120 J and 0.5 s
+    of lost traction per change is not a like-for-like comparison, and it flattered
+    the oracle badly: it takes THOUSANDS of gear changes to reach that number. So
+    the oracle's changes are counted and priced at the actuator rate, and reported
+    alongside:
+
+        oracle_shifts       gear changes the per-sample choice actually makes
+        oracle_shift_wh     what those cost at ShiftCost.energy_per_shift
+        oracle_charged      oracle + that actuation energy
+        prize_charged_wh    best single ratio - oracle_charged
+
+    Only the ACTUATION is charged, never the traction interruption - 1,610 changes
+    x 0.5 s of cut is not a manoeuvre any vehicle performs, and leaving it out keeps
+    ``oracle_charged`` a genuine lower bound on what per-sample selection costs. If
+    the prize is negative even then, the conclusion is unassailable: the ratio
+    choice cannot pay for the act of changing ratio.
+
+    The two single-ratio figures make ZERO changes and so carry no shift cost at
+    all - which is the correct comparison, not an omission.
     """
     veh = veh or Vehicle(); motor = motor or Motor(); gb = gb or Gearbox()
-    elec = elec or Electrical(); num = num or Numerics()
+    elec = elec or Electrical(); num = num or Numerics(); cost = cost or ShiftCost()
     G = _both_gears(cycle, emap, veh, motor, gb, num)
 
     batt = {}
@@ -1299,8 +1319,18 @@ def oracle_bound(cycle: CycleData, emap: EfficiencyMap, veh: Vehicle = None,
     single = min(e(batt[1]), e(batt[2]))
     oracle = e(best)
     act = G[2]["active"]
+
+    # What the oracle's clairvoyance actually costs to execute. It reselects at
+    # every sample, so count the changes in its own gear trace and price them.
+    pick = np.where(b1 < b2, 1, 2)
+    n_or = int(np.count_nonzero(np.diff(pick)))
+    or_wh = n_or * cost.energy_per_shift / 3.6e3        # J -> Wh
+    charged = oracle + or_wh / 1000.0
+
     return dict(gear1_only=e(batt[1]), gear2_only=e(batt[2]),
                 best_single=single, oracle=oracle, prize_wh=1000.0 * (single - oracle),
+                oracle_shifts=n_or, oracle_shift_wh=or_wh, oracle_charged=charged,
+                prize_charged_wh=1000.0 * (single - charged),
                 gear1_share=100.0 * float(np.mean((b1 < b2)[act])) if act.any() else np.nan)
 
 

@@ -1711,7 +1711,10 @@ class ShiftOptimiserApp(ctk.CTk):
         ax[1].axvline(dn, color=COLORS["success"], lw=2, ls="--")
         ax[1].set_xlabel("Road speed [km/h]"); ax[1].set_ylabel("Acceleration [m/s²]")
         ax[1].set_title("How much the choice is worth", fontweight="bold", fontsize=11)
-        self.log(self._optimal_summary(sp, ac, better, delta, up, dn))
+        self.log(self._optimal_summary(sp, ac, better, delta, up, dn,
+                                       self._f('cost', 'actuator_voltage', 12.0)
+                                       * self._f('cost', 'actuator_current', 20.0)
+                                       * self._f('cost', 'actuator_time_s', 0.5)))
         self.say("Optimal-gear boundary is a curve; a speed-only threshold is a line", "warn")
 
     # --------------------------------------- wide-open-throttle acceleration
@@ -2260,10 +2263,29 @@ class ShiftOptimiserApp(ctk.CTk):
               "  Cells carry ENERGY, not sample counts - an idling sample at 2 Nm and",
               "  one pulling 25 Nm are not comparable populations, but they are",
               "  comparable amounts of energy."]
+
+        # These bins are (rpm, torque) cells of the MOTOR. Two real costs have no
+        # operating point to live in and so cannot appear on this map at all - say
+        # so and reconcile, rather than letting the totals silently disagree with
+        # the ones every other view quotes.
+        shift_kwh = rA.shift_energy_kwh + rA.interrupt_energy_kwh
+        aux_kwh = rA.consumed_kwh - A["total_in"] - shift_kwh
+        L += ["", "  WHAT IS NOT ON THIS MAP", "  " + "-" * 62,
+              f"    binned into cells        {A['total_in']:9.4f} kWh   (traction only)",
+              f"    auxiliary load           {aux_kwh:9.4f} kWh   (no rpm, no torque)",
+              f"    shift actuator + cut     {shift_kwh:9.4f} kWh   "
+              f"({rA.upshifts + rA.downshifts} changes)",
+              f"    {'':25}{'-' * 9}",
+              f"    consumed (headline)      {rA.consumed_kwh:9.4f} kWh",
+              "",
+              "    The actuator runs off its own 12 V supply and the traction cut is",
+              "    the ABSENCE of an operating point, so neither is a cell on this map.",
+              "    They are in every energy total and every sweep ranking - just not",
+              "    here, because there is nowhere on a torque-speed map to draw them."]
         return NL.join(L)
 
     @staticmethod
-    def _optimal_summary(sp, ac, better, delta, up, dn):
+    def _optimal_summary(sp, ac, better, delta, up, dn, j_per_shift=0.0):
         """Measure the boundary rather than describing it."""
         NL = chr(10)
         g1 = int(np.nansum(better == 1)); g2 = int(np.nansum(better == 2))
@@ -2323,6 +2345,20 @@ class ShiftOptimiserApp(ctk.CTk):
                       "    of it is worth more than 3 points. Getting the boundary wrong",
                       "    costs little except in that minority, which is the only region",
                       "    worth designing a 2-D shift map for."]
+
+        # This plane is drawn from the efficiency map alone. It says which ratio is
+        # better AT a point; it is silent on what it costs to GET there, and a
+        # controller that tracked this boundary exactly would be changing gear
+        # constantly. That cost is real and it is what decides the answer.
+        L += ["", "  WHAT THIS MAP DOES NOT CHARGE", "  " + "-" * 58,
+              "    Which ratio is better at a point says nothing about what changing",
+              "    to it costs. A controller following this boundary exactly is the",
+              "    per-sample oracle in the sweep summaries: on this cycle it makes",
+              f"    ~1,600 gear changes, which at {j_per_shift:.0f} J each is more actuator",
+              "    energy than the entire efficiency prize it collects.",
+              "    So read this map as WHERE a 2-D shift schedule could help, never as",
+              "    a controller. Any real schedule has to be smooth enough to be worth",
+              "    executing - see the CEILING block in any sweep."]
         return NL.join(L)
 
     def _draw_gradeability(self, df, p, _kind):
@@ -2684,6 +2720,13 @@ class ShiftOptimiserApp(ctk.CTk):
         with perfect foresight and no shift cost, which no causal controller can
         beat. When the gap between "best single ratio" and that oracle is small,
         the shift schedule cannot matter however it is chosen.
+
+        Every row carries its GEAR-CHANGE COUNT, because that is what makes the
+        rows comparable: the single-ratio strategies make none, so they pay no
+        shift cost; the sweep's best pays for the changes it makes; and the oracle
+        makes thousands. The oracle is therefore shown twice - free, which is the
+        true mathematical bound, and charged its own actuator energy, which is what
+        the comparison actually has to be made against.
         """
         if self.cycle is None or self.emap is None:
             return []
@@ -2691,28 +2734,50 @@ class ShiftOptimiserApp(ctk.CTk):
             o = sc.oracle_bound(self.cycle, self.emap, **self.params())
         except Exception:
             return []
+        n = (sw.best.upshifts + sw.best.downshifts) if sw.best is not None else 0
+        best_kwh = sw.best.net_kwh if sw.best is not None else float("nan")
+        j = (self._f("cost", "actuator_voltage", 12.0)
+             * self._f("cost", "actuator_current", 20.0)
+             * self._f("cost", "actuator_time_s", 0.5))
         L = ["", "  CEILING - what is on the table at all", "  " + "-" * 56,
-             f"    always the low ratio      {o['gear1_only']:.4f} kWh",
-             f"    always the high ratio     {o['gear2_only']:.4f} kWh",
-             f"    perfect per-sample choice {o['oracle']:.4f} kWh  (oracle)",
-             f"    => the entire prize over the better single ratio is "
-             f"{o['prize_wh']:.1f} Wh ({100*o['prize_wh']/1000/o['best_single']:.2f} %)"]
-        if sw.best is not None and o["prize_wh"] > 0:
+             f"    {'strategy':<36}{'net kWh':>9}{'changes':>9}",
+             f"    {'always the low ratio':<36}{o['gear1_only']:9.4f}{0:9d}",
+             f"    {'always the high ratio':<36}{o['gear2_only']:9.4f}{0:9d}",
+             f"    {chr(34) + 'this sweep' + chr(34) + ' best':<36}{best_kwh:9.4f}{n:9d}",
+             f"    {'perfect per-sample, free shifting':<36}{o['oracle']:9.4f}"
+             f"{o['oracle_shifts']:9d}",
+             f"    {'the same, charged for its changes':<36}{o['oracle_charged']:9.4f}"
+             f"{o['oracle_shifts']:9d}",
+             "",
+             f"    Free-shifting prize over the better single ratio: {o['prize_wh']:.1f} Wh "
+             f"({100*o['prize_wh']/1000/o['best_single']:.2f} %).",
+             f"    But the oracle buys it with {o['oracle_shifts']:,} gear changes, and at "
+             f"{j:.0f} J each that is",
+             f"    {o['oracle_shift_wh']:.1f} Wh of actuator alone - "
+             f"{'MORE than the whole prize' if o['oracle_shift_wh'] > o['prize_wh'] else 'less than the prize'}."]
+        if o["prize_charged_wh"] < 0:
+            L += [f"    Charged, the prize is {o['prize_charged_wh']:+.1f} Wh: perfect "
+                  "clairvoyant gear selection",
+                  "    loses to simply staying in one ratio. And that is the GENEROUS",
+                  "    reading - only the actuator is charged, not the 0.5 s of lost",
+                  "    traction each change also costs.",
+                  "    => the ratio choice cannot pay for the act of changing ratio."]
+        else:
+            L.append(f"    Charged, {o['prize_charged_wh']:+.1f} Wh of prize survives.")
+        if sw.best is not None:
             got = (o["best_single"] - sw.best.net_kwh) * 1000.0   # both are NET
-            L.append(f"    this sweep's best captures {got:+.1f} Wh of that "
-                     f"({100*got/o['prize_wh']:.0f} % of the prize)")
+            paid = 1000 * (sw.best.shift_energy_kwh + sw.best.interrupt_energy_kwh)
+            L += ["",
+                  f"    This sweep's best is {got:+.1f} Wh against the better single ratio,",
+                  f"    paying {paid:.1f} Wh of shift cost over {n} changes."]
             if got < 0:
-                L.append("    NEGATIVE because the sweep pays the shift cost and the "
-                         "oracle does not:")
-                L.append("    the schedule spends more on shifting than the ratio choice "
-                         "returns.")
-        elif sw.best is not None:
-            L.append("    the prize is zero: one ratio is better everywhere")
-        L += ["    The oracle has clairvoyance, free shifting and no rate limit, so it",
-              "    is not achievable - it is the bound. The better ratio is the low one",
-              f"    on {o['gear1_share']:.1f} % of moving samples, and those samples are",
-              "    selected by LOAD, not by speed - which is why a speed threshold",
-              "    cannot collect them (see 'Optimal gear map')."]
+                L.append("    Negative: the second ratio does not earn its keep on this duty.")
+        L += ["",
+              "    The oracle has clairvoyance and no rate limit, so it is not achievable",
+              f"    - it is the bound. The better ratio is the low one on {o['gear1_share']:.1f} % of",
+              "    moving samples, and those samples are selected by LOAD, not by speed -",
+              "    which is why a speed threshold cannot collect them (see 'Optimal gear",
+              "    map')."]
         return L
 
 
