@@ -56,6 +56,7 @@ ANALYSES = [
     "Downshift sweep",
     "Combined grid",
     "Efficiency-only optimum",   # ranked on motor efficiency alone, nothing else
+    "Loss breakdown",            # where the energy goes as the threshold moves
     "Energy bins",               # where the energy goes, and where a schedule moves it
     "Gradeability",
     "Acceleration run",       # one 0 -> V (-> 0) manoeuvre, swept over the shift speed
@@ -787,6 +788,26 @@ class ShiftOptimiserApp(ctk.CTk):
                                           I["up_lo"], I["up_hi"], max(I["step"], 1.0),
                                           I["dn_lo"], I["dn_hi"], max(I["step"], 1.0),
                                           min_band=I["min_band"], **p)
+            elif kind == "Loss breakdown":
+                # Both thresholds, each anchored at the fixed point, so the two
+                # columns are slices through ONE self-consistent operating point.
+                a = sc.fixed_point_thresholds(
+                    self.cycle, self.emap, I["up_lo"], I["up_hi"], I["step"],
+                    I["dn_lo"], I["dn_hi"], I["step"],
+                    start_downshift=I["downshift"], **p)
+                hu = a["upshift"] if np.isfinite(a["upshift"]) else I["upshift"]
+                hd = a["downshift"] if np.isfinite(a["downshift"]) else I["downshift"]
+                su = sc.sweep_upshift(self.cycle, self.emap, hd,
+                                      I["up_lo"], I["up_hi"], I["step"], **p)
+                sd = sc.sweep_downshift(self.cycle, self.emap, hu,
+                                        I["dn_lo"], I["dn_hi"], I["step"], **p)
+                out = dict(
+                    anchor=a, held_up=hu, held_dn=hd, sweeps={"upshift": su,
+                                                              "downshift": sd},
+                    terms={"upshift": sc.sweep_energy_terms(su, self.cycle,
+                                                            self.emap, "upshift", **p),
+                           "downshift": sc.sweep_energy_terms(sd, self.cycle,
+                                                              self.emap, "downshift", **p)})
             elif kind == "Energy bins":
                 kw = dict(veh=p["veh"], motor=p["motor"], gb=p["gb"], num=p["num"],
                           rpm_step=max(50.0, I["bin_rpm"]),
@@ -875,6 +896,7 @@ class ShiftOptimiserApp(ctk.CTk):
         "Downshift sweep": "_draw_downshift",
         "Combined grid": "_draw_combined",
         "Efficiency-only optimum": "_draw_effopt",
+        "Loss breakdown": "_draw_lossshare",
         "Energy bins": "_draw_bins",
         "Gradeability": "_draw_gradeability",
         "Acceleration run": "_draw_acceleration",
@@ -1958,6 +1980,188 @@ class ShiftOptimiserApp(ctk.CTk):
               "  is a performance test, not the energy question the drive-cycle analyses",
               "  answer. Read them together - the fastest schedule is rarely the",
               "  most efficient one."]
+        return NL.join(L)
+
+    # ------------------------------------------------------- loss breakdown
+    TERMS = [("wheel", "road work", "#5b6b7f"),
+             ("gearbox", "gearbox loss", "#8fa3b8"),
+             ("motor", "MOTOR loss", "#a30f45"),
+             ("aux", "auxiliary", "#c9a227"),
+             ("shift", "shift actuator + cut", "#1a7f4b")]
+
+    def _draw_lossshare(self, out, p, _kind):
+        """Where the energy goes as each threshold moves.
+
+        This exists because a sweep summary quotes only the winner. It says the
+        winner made N changes and nothing about how N moved across the sweep, so
+        the shift penalty is invisible and "peak efficiency here but minimum
+        energy there" reads as a contradiction rather than as the trade it is.
+        Column per threshold; the middle row is the answer.
+        """
+        gs = self.fig.add_gridspec(3, 2, hspace=.38, wspace=.30)
+        any_data = False
+        for c, col in enumerate(("upshift", "downshift")):
+            df = out["terms"][col]
+            if df is None or df.empty:
+                ax = self.fig.add_subplot(gs[:, c])
+                ax.text(.5, .5, "no feasible " + col + " candidate",
+                        ha="center", va="center", color=COLORS["danger"])
+                ax.set_xticks([])
+                ax.set_yticks([])
+                continue
+            any_data = True
+            x = df["threshold"].to_numpy()
+            held = out["held_dn"] if col == "upshift" else out["held_up"]
+            other = "downshift" if col == "upshift" else "upshift"
+            i_best = int(np.argmin(df["net_kwh"].to_numpy()))
+            i_eff = int(np.argmax(df["mean_efficiency"].to_numpy()))
+
+            # --- row 1: the LOSSES, stacked ------------------------------
+            # Road work is excluded on purpose. It is ~8x every loss combined and
+            # barely moves with the threshold, so stacking it flattens the four
+            # terms that actually differ into an unreadable sliver. Its value is
+            # in the title instead.
+            a1 = self.fig.add_subplot(gs[0, c])
+            loss_terms = [t for t in self.TERMS if t[0] != "wheel"]
+            ys = [1000 * df[k].to_numpy() for k, _, _ in loss_terms]
+            a1.stackplot(x, *ys, labels=[lb for _, lb, _ in loss_terms],
+                         colors=[cc for _, _, cc in loss_terms], alpha=.92)
+            a1.set_ylabel("loss [Wh]")
+            a1.set_title(col + " sweep - share of the LOSSES" + chr(10)
+                         + "(" + other + " held at " + format(held, "g")
+                         + " km/h; road work "
+                         + format(1000 * df["wheel"].mean(), ".0f")
+                         + " Wh excluded)", fontsize=9.5)
+            if c == 0:
+                a1.legend(fontsize=7, loc="upper left", ncol=2, framealpha=.9)
+
+            # --- row 2: THE answer - efficiency against the penalty ------
+            a2 = self.fig.add_subplot(gs[1, c])
+            a2b = a2.twinx()
+            a2b.bar(x, df["shifts"], width=.55, color=self.TERMS[4][2], alpha=.16,
+                    zorder=0)
+            a2b.set_ylabel("gear changes", color=self.TERMS[4][2], fontsize=9)
+            a2b.tick_params(axis="y", labelcolor=self.TERMS[4][2], labelsize=8)
+            a2.set_zorder(a2b.get_zorder() + 1)
+            a2.patch.set_visible(False)
+            a2.plot(x, df["shift_wh"], "-o", ms=3.5, color=self.TERMS[4][2], lw=2,
+                    label="shift cost [Wh]")
+            a2.plot(x, df["motor_wh"] - df["motor_wh"].min(), "-s", ms=3.5,
+                    color=self.TERMS[2][2], lw=2,
+                    label="MOTOR loss above its own min")
+            a2.set_ylabel("Wh")
+            a2.axvline(x[i_best], color="k", ls="--", lw=1.2)
+            a2.axvline(x[i_eff], color=self.TERMS[2][2], ls=":", lw=1.6)
+            a2.legend(fontsize=7, loc="upper left", framealpha=.9)
+            a2.set_title("what each threshold buys, and what it costs", fontsize=9)
+
+            # --- row 3: net and efficiency, both optima marked -----------
+            a3 = self.fig.add_subplot(gs[2, c])
+            a3.plot(x, 1000 * df["net_kwh"], "-o", ms=3.5, color="k", lw=2,
+                    label="net energy")
+            a3.scatter([x[i_best]], [1000 * df["net_kwh"].iloc[i_best]], s=110,
+                       color="k", zorder=3,
+                       label="least energy " + format(x[i_best], "g"))
+            a3.set_xlabel(col + " speed [km/h]")
+            a3.set_ylabel("net [Wh]")
+            a3e = a3.twinx()
+            a3e.plot(x, 100 * df["mean_efficiency"], "-s", ms=3.5,
+                     color=self.TERMS[2][2], lw=1.6, alpha=.85)
+            a3e.scatter([x[i_eff]], [100 * df["mean_efficiency"].iloc[i_eff]], s=110,
+                        marker="X", color=self.TERMS[2][2], zorder=3)
+            a3e.set_ylabel("mean motor efficiency [%]", color=self.TERMS[2][2],
+                           fontsize=9)
+            a3e.tick_params(axis="y", labelcolor=self.TERMS[2][2], labelsize=8)
+            a3.legend(fontsize=7, loc="center left", framealpha=.9)
+            gap = ("the same point" if i_best == i_eff
+                   else format(abs(x[i_eff] - x[i_best]), "g") + " km/h apart")
+            a3.set_title("least energy " + format(x[i_best], "g")
+                         + " vs best efficiency " + format(x[i_eff], "g")
+                         + " - " + gap, fontsize=9)
+
+        self.fig.suptitle("Loss breakdown - what moves when a threshold moves",
+                          fontsize=12, fontweight="bold")
+        if any_data:
+            self.log(self._lossshare_summary(out))
+            self.say("Loss breakdown drawn", "ok")
+
+    def _lossshare_summary(self, out):
+        NL = chr(10)
+        L = ["Loss breakdown - what each threshold actually buys", "=" * 74, "",
+             "  Anchored at the self-consistent pair "
+             + format(out["held_up"], "g") + "/" + format(out["held_dn"], "g")
+             + " km/h, so the two",
+             "  columns are slices through ONE operating point, not two unrelated",
+             "  searches.", ""]
+        for col in ("upshift", "downshift"):
+            df = out["terms"][col]
+            if df is None or df.empty:
+                L += ["  " + col.upper() + ": no feasible candidate.", ""]
+                continue
+            i_b = int(np.argmin(df["net_kwh"].to_numpy()))
+            i_e = int(np.argmax(df["mean_efficiency"].to_numpy()))
+            xb = df["threshold"].iloc[i_b]
+            xe = df["threshold"].iloc[i_e]
+            L += ["  " + col.upper() + " SWEEP", "  " + "-" * 66,
+                  f"    {'thr':>5}{'changes':>9}{'shift Wh':>10}{'motor Wh':>10}"
+                  f"{'mean eff':>10}{'net Wh':>10}"]
+            for k in range(len(df)):
+                mark = ("  <- least energy" if k == i_b else
+                        ("  <- best efficiency" if k == i_e else ""))
+                L.append(f"    {df['threshold'].iloc[k]:5.0f}"
+                         f"{int(df['shifts'].iloc[k]):9d}"
+                         f"{df['shift_wh'].iloc[k]:10.1f}"
+                         f"{df['motor_wh'].iloc[k]:10.1f}"
+                         f"{100*df['mean_efficiency'].iloc[k]:9.3f}%"
+                         f"{1000*df['net_kwh'].iloc[k]:10.1f}{mark}")
+            if i_b == i_e:
+                L += ["",
+                      "    Least energy and best efficiency are both at "
+                      + format(xb, "g") + " km/h - nothing is",
+                      "    being traded here.", ""]
+            else:
+                d_eff = df["motor_wh"].iloc[i_b] - df["motor_wh"].iloc[i_e]
+                d_sh = df["shift_wh"].iloc[i_b] - df["shift_wh"].iloc[i_e]
+                n_e = int(df["shifts"].iloc[i_e])
+                n_b = int(df["shifts"].iloc[i_b])
+                L += ["",
+                      "    Best efficiency is at " + format(xe, "g")
+                      + " km/h; least energy is at " + format(xb, "g") + " km/h.",
+                      f"    Moving from {xe:g} to {xb:g}:",
+                      f"      motor loss   {d_eff:+7.1f} Wh   "
+                      f"(the map really is worse there)",
+                      f"      shift cost   {d_sh:+7.1f} Wh   "
+                      f"({n_e} changes -> {n_b})",
+                      f"      NET          {d_eff + d_sh:+7.1f} Wh"]
+                # the sentence has to match which mechanism actually moved
+                if n_b < n_e:
+                    L += ["",
+                          "    THAT is why the energy optimum is not where the map is",
+                          f"    happiest: the cheaper threshold makes {n_e - n_b} fewer gear",
+                          "    changes. The map prefers the busier schedule; the battery",
+                          "    refuses to pay for it."]
+                elif abs(d_sh) > 1e-9:
+                    L += ["",
+                          "    Note the change COUNT is the same at both. The shift cost",
+                          "    still differs because the traction cut is charged at the",
+                          "    power actually flowing when each change happens - shifting",
+                          "    at a higher speed interrupts a bigger load. So this is not",
+                          "    a shift-count effect, it is a shift-TIMING effect."]
+                else:
+                    L += ["",
+                          "    The shift cost is identical at both, so the difference here",
+                          "    is entirely in the motor term - read this one as a genuine",
+                          "    efficiency-map result."]
+                L.append("")
+        L += ["  Reading the panels:",
+              "    row 1  every Wh in the cycle, stacked. The green band is the shift",
+              "           cost - watch it grow as the threshold moves.",
+              "    row 2  the trade on one axis: shift cost against motor loss above",
+              "           its own minimum, with the gear-change count as bars behind.",
+              "           Whichever curve is higher decides the answer.",
+              "    row 3  net energy (black, left) and mean efficiency (red, right),",
+              "           each with its own optimum marked. When the dot and the cross",
+              "           are not at the same x, row 2 says why."]
         return NL.join(L)
 
     # -------------------------------------------- efficiency-only optimum

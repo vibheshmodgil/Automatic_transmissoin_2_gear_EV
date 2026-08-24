@@ -29,7 +29,7 @@ Windows users can double-click `Run Shift Optimiser.bat`.
 |---|---|
 | `shift_core.py` | Physics engine. Pure functions and dataclasses — no UI, no globals. |
 | `shift_app.py` | CustomTkinter front end. Presentation only; every number comes from the core. |
-| `verify_model.py` | Independent verification suite. 53 checks against closed forms and analytic identities. |
+| `verify_model.py` | Independent verification suite. 56 checks against closed forms and analytic identities. |
 | `make_shift_report.py` | Builds a self-contained HTML report with all figures embedded. |
 | `sample_data/` | Synthetic cycle and map, plus the format specification. |
 | `docs/ENGINEERING_NOTES.md` | Full working notes: every defect found, why each decision was made. |
@@ -112,6 +112,15 @@ keeps the motor in the best part of its map" without any other cost in the way.
 Candidates refused by the schedule constraints are drawn as red bars rather than dropped,
 and the summary lists how many went and why — a curve that starts above the speed you
 asked for is always explained.
+
+**Loss breakdown** — where the energy goes as each threshold moves, one column per
+threshold, both anchored at the self-consistent pair so they are slices through one
+operating point. Row 1 stacks the four losses (road work excluded and stated in the
+title — it is ~8x every loss combined and barely moves). Row 2 is the one that answers
+"why is the most efficient schedule not the cheapest": shift cost against motor loss on a
+single axis, with the gear-change count as bars behind it. Row 3 puts net energy and mean
+efficiency side by side with each optimum marked. Use it whenever a sweep's answer looks
+like it disagrees with the efficiency map.
 
 ▸ **Gradeability** — maximum sustainable grade at steady speed, per ratio.
 
@@ -246,7 +255,7 @@ the shift schedule cannot matter however it is chosen.
 
 ## Verification
 
-`verify_model.py` runs 53 checks. Each states a prediction derived independently — a
+`verify_model.py` runs 56 checks. Each states a prediction derived independently — a
 closed form, an analytic identity, or a bound physics requires — and compares. Nothing
 calls the code under test to produce its own expected value.
 

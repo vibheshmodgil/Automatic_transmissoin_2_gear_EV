@@ -636,6 +636,47 @@ check("C11d a typed anchor can be infeasible; the fixed point never is",
       "candidate (15 is itself rejected by the acceleration gate), while the "
       f"fixed-point anchor {fp['upshift']:g} km/h is by construction an optimum")
 
+section("C12 The loss breakdown must add up",
+        "the per-candidate split is what makes the shift penalty visible, so it has "
+        "to reconcile with the totals the sweeps rank on - and the shift term must "
+        "track the gear-change count, not float free of it.")
+
+sd_lb = M.sweep_downshift(cy, em, 22, 4, 21, 1, **Pc)
+tb = M.sweep_energy_terms(sd_lb, cy, em, "downshift", **Pc)
+worst = float(np.max(np.abs(tb["wheel"] + tb["gearbox"] + tb["motor"]
+                            + tb["aux"] + tb["shift"] - tb["total"])))
+check("C12 the five terms sum to the battery total for every candidate",
+      worst < 1e-12,
+      f"{len(tb)} candidates, worst residual {1e6*worst:.3f} uWh")
+
+# Not monotone in the change COUNT, and it should not be: the traction cut is
+# charged at the power flowing when each change happens, so three candidates
+# with 710 changes each cost slightly different amounts. What must hold is that
+# the cost is bounded below by the actuator floor and tracks the count strongly.
+per = tb["shift_wh"] / tb["shifts"]
+r_rank = float(np.corrcoef(tb["shifts"].rank(), tb["shift_wh"].rank())[0, 1])
+check("C12b shift cost tracks the number of changes and never dips below the floor",
+      float(per.min()) >= cst.energy_per_shift / 3.6e3 - 1e-9 and r_rank > 0.95,
+      f"{int(tb['shifts'].min())}-{int(tb['shifts'].max())} changes -> "
+      f"{tb['shift_wh'].min():.1f}-{tb['shift_wh'].max():.1f} Wh; rank correlation "
+      f"{r_rank:.3f}; per change {per.min():.3f}-{per.max():.3f} Wh, never under the "
+      f"{cst.energy_per_shift/3.6e3:.3f} Wh actuator floor (the rest is the cut, "
+      f"charged at the local traction power - which is why it is not exactly "
+      f"proportional)")
+
+# the question this panel exists to answer, asserted as an identity
+i_b = int(np.argmin(tb["net_kwh"].to_numpy()))
+i_e = int(np.argmax(tb["mean_efficiency"].to_numpy()))
+d_motor = tb["motor_wh"].iloc[i_b] - tb["motor_wh"].iloc[i_e]
+d_shift = tb["shift_wh"].iloc[i_b] - tb["shift_wh"].iloc[i_e]
+check("C12c peak efficiency is not least energy, and the shift term is why",
+      i_b != i_e and d_motor > 0 and d_shift < 0 and (d_motor + d_shift) < 0,
+      f"best efficiency at {tb['threshold'].iloc[i_e]:g} km/h, least energy at "
+      f"{tb['threshold'].iloc[i_b]:g}; moving there costs {d_motor:+.1f} Wh of motor "
+      f"and saves {-d_shift:.1f} Wh of shift cost "
+      f"({int(tb['shifts'].iloc[i_e])} changes -> {int(tb['shifts'].iloc[i_b])}), "
+      f"net {d_motor + d_shift:+.1f} Wh")
+
 # ======================================================================= END
 print("\n" + "=" * 78)
 n_fail = sum(1 for *_, ok, _ in [(s, n, o, d) for s, n, o, d in RESULTS] if not ok)

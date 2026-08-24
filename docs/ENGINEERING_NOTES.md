@@ -1184,6 +1184,75 @@ indifference band, and a typed anchor can be infeasible where the fixed point ca
 53/53 pass.
 
 
+## 7o. "Efficiency peaks at 16 but energy is minimum at 4" - and where the penalty went
+
+Two questions from the same run: *why does the downshift with the best efficiency not have
+the least energy*, and *it is not clear the penalty is active with more or fewer shifts*.
+They have one answer, and the tool was not showing it.
+
+### The mechanism
+
+Efficiency and shift count rise **together**. Raising the downshift threshold keeps gear 1
+engaged over more of the cycle, which the map likes - and makes the controller cross the
+threshold far more often. On the stand-in data, downshift sweep at upshift 18:
+
+| downshift | changes | shift cost | motor loss | mean eff | net |
+|---|---|---|---|---|---|
+| 4-9 | 62 | 19.2 Wh | 650.5 Wh | 92.509 % | **9884.1 Wh  <- least energy** |
+| 10 | 136 | 42.9 | 647.6 | 92.541 % | 9906.8 |
+| **11** | **220** | **69.3** | **647.6** | **92.542 %  <- best efficiency** | 9935.1 |
+| 12 | 300 | 94.4 | 651.9 | 92.498 % | 9966.0 |
+| 15 | 542 | 171.2 | 689.7 | 92.101 % | 10083.9 |
+
+Moving from the efficiency optimum (11) to the energy optimum (4) **costs 7.8 Wh in the
+motor and saves 60.2 Wh in shift cost** - 220 gear changes down to 62. Net **-52.3 Wh**.
+
+**The map prefers the busier schedule; the battery refuses to pay for it.** Nothing is
+inconsistent - the two optima answer different questions, and the shift term is the whole
+difference between them. Same story on the upshift side, smaller: best efficiency 22,
+least energy 18, worth -2.5 Wh.
+
+### Why it was invisible
+
+The sweep summary quotes the **winner's** shift count and nothing else. How the count moves
+across the sweep - the one number that decides this - never appeared anywhere. So the sweep
+read as if it were ranking on the efficiency map, and the penalty looked inert.
+
+### New analysis: `Loss breakdown`
+
+Both thresholds, each anchored at the self-consistent pair (7n), so the two columns are
+slices through **one** operating point. Three rows per column:
+
+| row | what it shows |
+|---|---|
+| 1 | the four **losses** stacked - gearbox, motor, auxiliary, shift. Road work is excluded and its value put in the title: at ~7,800 Wh it is 8x every loss combined and barely moves, so stacking it flattens everything that does. The green shift band visibly grows with the threshold. |
+| 2 | **the answer.** Shift cost against motor loss above its own minimum, on one axis, with the gear-change count as bars behind. Whichever curve is higher decides. The dashed line is the energy optimum, the dotted line the efficiency optimum. |
+| 3 | net energy (black, left) and mean efficiency (red, right), each optimum marked. When the dot and the cross are not at the same x, row 2 says why. |
+
+The text summary prints the full per-candidate table - threshold, changes, shift Wh, motor
+Wh, mean efficiency, net Wh - and then states the trade in Wh, naming the mechanism that
+actually moved:
+
+* fewer changes -> "the cheaper threshold makes N fewer gear changes";
+* **same** count, different cost -> "the cut is charged at the power actually flowing when
+  each change happens, so this is a shift-TIMING effect, not a shift-count one";
+* identical shift cost -> "read this one as a genuine efficiency-map result".
+
+`sweep_energy_terms()` in `shift_core.py` does the work: it re-runs each feasible candidate
+with `keep_arrays=True` and returns the five terms plus the change count. 0.3 s for a 1-D
+sweep; capped by `max_candidates` for anything larger.
+
+Verified by C12 in `verify_model.py` (3 checks): the five terms sum to the battery total to
+0.000 uWh, the shift cost tracks the change count (rank correlation 0.997) and never dips
+below the 0.033 Wh actuator floor, and the efficiency optimum is provably not the energy
+optimum with the shift term accounting for the gap. 56/56 pass.
+
+> Note the shift cost is **not exactly** proportional to the change count: the actuator
+> part is, but the traction cut is charged at the power flowing when each change happens.
+> Three candidates with 710 changes each cost 271.8, 270.1 and 270.7 Wh. That is physics,
+> not noise, and C12b asserts the correlation rather than a false proportionality.
+
+
 ## 8. Fix order (first four change the answer)
 
 1. **Enforce `downshift < upshift` in every sweep**, not just the combined grid. This alone deletes the headline result.

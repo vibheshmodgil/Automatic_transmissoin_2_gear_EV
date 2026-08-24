@@ -44,7 +44,7 @@ __all__ = [
     "sweep_downshift", "sweep_grid", "sweep_efficiency", "gear_breakdown",
     "wot_run", "wot_sweep", "tractive_force", "road_load_force",
     "oracle_bound", "shift_decomposition", "counterfactual_point",
-    "accel_capability", "best_by_energy", "fixed_point_thresholds", "energy_breakdown", "better_gear_per_sample", "efficiency_ridge", "energy_bins",
+    "accel_capability", "best_by_energy", "fixed_point_thresholds", "sweep_energy_terms", "energy_breakdown", "better_gear_per_sample", "efficiency_ridge", "energy_bins",
 ]
 
 # numpy 1.x / 2.x compatible trapezoid rule (VMI pins numpy==1.26.4)
@@ -1180,6 +1180,57 @@ def energy_breakdown(res: ShiftResult, cycle: CycleData, veh: Vehicle = None,
     return dict(wheel=e_wheel, gearbox=e_shaft - e_wheel, motor=e_elec - e_shaft,
                 aux=e_aux, shift=e_shift, battery=e_batt + e_shift,
                 efficiency=e_shaft / e_elec if e_elec > 0 else np.nan)
+
+
+def sweep_energy_terms(sweep: SweepResult, cycle: CycleData, emap: EfficiencyMap,
+                       col: str, max_candidates: int = 160,
+                       veh: Vehicle = None, motor: Motor = None, gb: Gearbox = None,
+                       elec: Electrical = None, cost: ShiftCost = None,
+                       num: Numerics = None) -> pd.DataFrame:
+    """Per-candidate energy split across a sweep - the shift penalty made visible.
+
+    A sweep summary quotes the winner's shift count and nothing else, so the one
+    thing a reader most wants to check - *is the penalty actually doing anything
+    as the threshold moves?* - is invisible, and the sweep reads as if it were
+    ranking on the efficiency map when it may not be. This returns, for every
+    feasible candidate: the five energy terms, the gear-change count, the shift
+    cost in Wh, the mean efficiency and the net energy.
+
+    That is what makes "peak efficiency at one threshold, minimum energy at
+    another" legible instead of contradictory: efficiency and shift count rise
+    together, the two effects pull opposite ways, and whichever is larger decides.
+    Seeing both columns side by side answers it in one glance.
+
+    ``energy_breakdown`` needs the sample arrays, so each candidate is re-run with
+    ``keep_arrays=True``; cheap for a 1-D sweep, capped by ``max_candidates``.
+    """
+    ok = [d for d in sweep.details if d.feasible and np.isfinite(_objective(d))]
+    if not ok:
+        return pd.DataFrame()
+    ok.sort(key=lambda r: getattr(r, col))
+    if len(ok) > max_candidates:                 # even sample, both ends kept
+        idx = np.unique(np.linspace(0, len(ok) - 1, max_candidates).astype(int))
+        ok = [ok[i] for i in idx]
+
+    rows = []
+    for r in ok:
+        full = simulate(cycle, emap, r.upshift, r.downshift, keep_arrays=True,
+                        veh=veh, motor=motor, gb=gb, elec=elec, cost=cost, num=num)
+        if not full.feasible or full.gear is None:
+            continue
+        b = energy_breakdown(full, cycle, veh=veh, motor=motor, gb=gb,
+                             elec=elec, num=num)
+        n = full.upshifts + full.downshifts
+        rows.append(dict(
+            threshold=getattr(full, col), upshift=full.upshift,
+            downshift=full.downshift,
+            wheel=b["wheel"], gearbox=b["gearbox"], motor=b["motor"],
+            aux=b["aux"], shift=b["shift"], total=b["battery"],
+            shifts=n, shift_wh=1000.0 * b["shift"],
+            motor_wh=1000.0 * b["motor"],
+            mean_efficiency=full.mean_efficiency, net_kwh=full.net_kwh,
+            recovered_kwh=full.recovered_kwh))
+    return pd.DataFrame(rows)
 
 
 def energy_bins(res: ShiftResult, cycle: CycleData, veh: Vehicle = None,
