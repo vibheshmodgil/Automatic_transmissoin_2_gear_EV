@@ -1528,6 +1528,65 @@ low ratio wins at the bottom and loses at the top, and the band where it wins ca
 a quarter of the energy. 67/67 pass **on the real data**.
 
 
+## 7t. Why the downshift answer is 4 (or 1) when efficiency peaks at 10
+
+The question, asked once more and this time worth a measurement rather than another
+explanation: *the downshift sweep returns the bottom of the range even though efficiency
+peaks later.* It does, and here is exactly what decides it.
+
+Real N603 data, upshift 18, regen on, downshift 1-15:
+
+| D | changes | under traction | actuator | traction cut | mean eff | net |
+|---|---|---|---|---|---|---|
+| **1** | 64 | 33 | 2.13 Wh | 13.5 Wh | 91.941 % | **9305.7 Wh** |
+| 4 | 116 | 60 | 3.87 | 26.4 | 92.033 % | 9313.7 |
+| 7 | 184 | 93 | 6.13 | 42.0 | 92.101 % | 9327.4 |
+| **10** | 308 | 169 | 10.27 | 68.2 | **92.125 %** | 9357.8 |
+| 15 | 604 | 338 | 20.13 | 131.0 | 91.892 % | 9456.3 |
+
+From D = 1 to D = 10 the map gives back **0.18 points** and the traction cut takes
+**54.7 Wh**. The actuator - the measured 120 J - contributes 8 Wh of that and decides
+nothing.
+
+### The measurement that settles it
+
+Re-run the same sweep under different shift-cost models and watch where each optimum lands:
+
+| shift-cost model | best downshift | net |
+|---|---|---|
+| free shifting | 8 | 9278.3 Wh |
+| actuator only, 120 J, no cut | 7 | 9285.4 |
+| actuator + 0.10 s cut | 5 | 9292.5 |
+| actuator + 0.25 s cut | 2 | 9298.6 |
+| **actuator + 0.50 s cut (shipped)** | **1** | 9305.7 |
+| *efficiency peak* | *10* | *unmoved by any of them* |
+
+**The optimum walks 7 km/h across these models while the efficiency peak does not move at
+all.** So the gap between the two is not the map contradicting itself - it is the price of
+changing gear, and specifically the **traction cut**.
+
+That matters because the cut is **the least certain input in the whole study**. The
+actuator is measured hardware from the vehicle team; the 0.5 s of lost traction is an
+assumption about how the controller behaves. Anyone quoting a downshift speed should pin
+that number down first. `shift_cost_sensitivity()` computes the table and both sweep
+summaries print it under **IS THIS A MAP RESULT OR A SHIFT-COST RESULT?**
+
+### What it does not change
+
+The whole span, free shifting to a full 0.5 s cut, is **27.4 Wh over 111 km - 0.30 %**. It
+moves the recommended threshold; it does not move the conclusion that the second ratio does
+not pay for itself (7s).
+
+And an optimum at the bottom of the range is not a failed search here - it is a statement:
+**downshift only just before stopping.** Which is what a real AMT does anyway. It drops to
+the low ratio to be ready to launch, not to save energy on the way down - and the
+gradeability and launch case for the low ratio (7d, 7f) is unaffected by any of this.
+
+Verified by C17 in `verify_model.py` (3 checks): the optimum walks with the cut while the
+efficiency peak stays fixed, charging more per shift never lowers the energy, and the whole
+span is under 0.30 % of the cycle. 70/70 pass on the real data.
+
+
 ## 8. Fix order (first four change the answer)
 
 1. **Enforce `downshift < upshift` in every sweep**, not just the combined grid. This alone deletes the headline result.

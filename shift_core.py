@@ -44,7 +44,7 @@ __all__ = [
     "sweep_downshift", "sweep_grid", "sweep_efficiency", "gear_breakdown",
     "wot_run", "wot_sweep", "tractive_force", "road_load_force",
     "oracle_bound", "shift_decomposition", "counterfactual_point",
-    "build_stamp", "accel_capability", "best_by_energy", "fixed_point_thresholds", "sweep_energy_terms", "energy_breakdown", "better_gear_per_sample", "ratio_crossover", "effective_crossover", "efficiency_ridge", "energy_bins",
+    "build_stamp", "accel_capability", "best_by_energy", "fixed_point_thresholds", "shift_cost_sensitivity", "sweep_energy_terms", "energy_breakdown", "better_gear_per_sample", "ratio_crossover", "effective_crossover", "efficiency_ridge", "energy_bins",
 ]
 
 # numpy 1.x / 2.x compatible trapezoid rule (VMI pins numpy==1.26.4)
@@ -1155,6 +1155,51 @@ def best_by_energy(details) -> Optional[ShiftResult]:
     tied = [r for r, x in zip(ok, e) if x <= e.min() + abs(e.min()) * _TIE_REL]
     tied.sort(key=lambda r: (-(r.upshift - r.downshift), r.upshift))
     return tied[len(tied) // 2]
+
+
+def shift_cost_sensitivity(cycle, emap, col: str, held: float, values,
+                           cost: ShiftCost = None, **kw) -> pd.DataFrame:
+    """Where the threshold optimum goes as the shift cost is varied.
+
+    A sweep reports one argmin under one cost model and says nothing about how
+    much of that number came from the model rather than from the map. For the
+    downshift that matters more than anything else: the answer is set almost
+    entirely by the TRACTION CUT, which is the least certain input in the whole
+    study - the actuator energy is measured hardware, the 0.5 s of lost traction
+    is an assumption about how the controller behaves.
+
+    Runs the same 1-D sweep under free shifting, actuator-only, and a range of
+    cut durations, so the reader can see immediately whether the optimum is a
+    map result or a cut-duration result.
+    """
+    cost = cost or ShiftCost()
+    keep = dict(max_shifts_per_hour=cost.max_shifts_per_hour,
+                min_band_kmh=cost.min_band_kmh,
+                min_accel_reserve=cost.min_accel_reserve,
+                max_accel_loss=cost.max_accel_loss)
+    models = [("free shifting", ShiftCost(0.0, 0.0, **keep)),
+              ("actuator only, no cut",
+               ShiftCost(cost.actuation_energy, 0.0, **keep))]
+    for f in (0.2, 0.5, 1.0):
+        t = cost.actuator_time_s * f
+        models.append((f"actuator + {t:.2f} s cut",
+                       ShiftCost(cost.actuation_energy, t, **keep)))
+
+    rows = []
+    for label, c in models:
+        best_v, best_e, eff_v, eff_e = np.nan, np.inf, np.nan, -np.inf
+        for v in values:
+            u, d = (v, held) if col == "upshift" else (held, v)
+            r = simulate(cycle, emap, u, d, cost=c, **kw)
+            if not r.feasible or not np.isfinite(r.net_kwh):
+                continue
+            if r.net_kwh < best_e:
+                best_e, best_v = r.net_kwh, v
+            if np.isfinite(r.mean_efficiency) and r.mean_efficiency > eff_e:
+                eff_e, eff_v = r.mean_efficiency, v
+        rows.append(dict(model=label, best_threshold=best_v, net_kwh=best_e,
+                         eff_threshold=eff_v, best_efficiency=eff_e))
+    return pd.DataFrame(rows)
 
 
 def fixed_point_thresholds(cycle, emap, up_lo=8.0, up_hi=42.0, up_step=1.0,

@@ -813,6 +813,37 @@ check("C16c the band where the low ratio wins carries little of the energy",
       f"{share:.1f} % of the motoring energy - which is why no downshift threshold "
       f"can be worth much")
 
+section("C17 The downshift optimum is a cut-duration result, not a map result",
+        "the downshift optimum sits well below the efficiency peak, and the sweep "
+        "alone cannot say whether that gap comes from the map or from the assumed "
+        "traction cut. Vary the cut: if the optimum walks and the efficiency peak "
+        "does not, the gap is the cut - the least certain input in the study.")
+
+vals = list(range(1, 16))
+sens = M.shift_cost_sensitivity(cy, em, "downshift", 18.0, vals,
+                                cost=M.ShiftCost(max_shifts_per_hour=1e9,
+                                                 min_band_kmh=3),
+                                veh=veh, motor=mot, gb=gb,
+                                elec=M.Electrical(regen_enabled=True), num=num)
+walk = abs(sens["best_threshold"].iloc[-1] - sens["best_threshold"].iloc[0])
+eff_moved = sens["eff_threshold"].nunique()
+check("C17 the optimum walks with the cut while the efficiency peak does not",
+      walk >= 2 and eff_moved == 1,
+      "; ".join(f"{r['model']} -> {r['best_threshold']:.0f}"
+                for _, r in sens.iterrows())
+      + f"; efficiency peak fixed at {sens['eff_threshold'].iloc[0]:.0f} km/h")
+
+check("C17b charging more per shift never lowers the energy at the optimum",
+      bool(np.all(np.diff(sens["net_kwh"].to_numpy()) >= -1e-12)),
+      " -> ".join(f"{1000*x:.1f}" for x in sens["net_kwh"]) + " Wh")
+
+span = 1000 * (sens["net_kwh"].max() - sens["net_kwh"].min())
+check("C17c and the whole span is small enough to change no conclusion",
+      span < 100,
+      f"free shifting to a full {0.5:g} s cut spans {span:.1f} Wh over "
+      f"{cy.distance_km:.0f} km - under {100*span/1000/sens['net_kwh'].min():.2f} % "
+      f"of the cycle")
+
 # ======================================================================= END
 print("\n" + "=" * 78)
 n_fail = sum(1 for *_, ok, _ in [(s, n, o, d) for s, n, o, d in RESULTS] if not ok)

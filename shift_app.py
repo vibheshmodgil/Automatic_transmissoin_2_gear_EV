@@ -2948,6 +2948,63 @@ class ShiftOptimiserApp(ctk.CTk):
                       "    force. Use 'Gear comparison' to see the two curves."]
         return L
 
+    def _cost_sensitivity_lines(self, sw, col, p):
+        """Is this argmin a map result or a shift-cost result?
+
+        The downshift optimum lands well below the efficiency peak and the sweep
+        gives no way to tell whether that gap comes from the map or from the
+        assumed traction cut. It comes almost entirely from the cut - the least
+        certain input in the study, since the actuator is measured hardware and
+        the 0.5 s of lost traction is an assumption about the controller. Showing
+        where the optimum walks as the cut is varied answers the question the
+        sweep otherwise invites and cannot settle.
+        """
+        if sw.best is None or col not in ("upshift", "downshift"):
+            return []
+        vals = sorted({getattr(d, col) for d in sw.details})
+        if len(vals) < 3:
+            return []
+        held = getattr(sw.best, "downshift" if col == "upshift" else "upshift")
+        try:
+            df = sc.shift_cost_sensitivity(
+                self.cycle, self.emap, col, held, vals, cost=p["cost"],
+                veh=p["veh"], motor=p["motor"], gb=p["gb"], elec=p["elec"],
+                num=p["num"])
+        except Exception:
+            return []
+        if df.empty:
+            return []
+        eff_at = df["eff_threshold"].iloc[0]
+        L = ["", "  IS THIS A MAP RESULT OR A SHIFT-COST RESULT?", "  " + "-" * 56,
+             f"    {'shift-cost model':<30}{'best ' + col:>12}{'net Wh':>11}"]
+        for _, r in df.iterrows():
+            L.append(f"    {r['model']:<30}{r['best_threshold']:12.0f}"
+                     f"{1000*r['net_kwh']:11.1f}")
+        L += [f"    {'efficiency peaks at':<30}{eff_at:12.0f}"
+              f"{'':>11}   <- unmoved by cost"]
+        span = 1000 * (df["net_kwh"].max() - df["net_kwh"].min())
+        walk = abs(df["best_threshold"].iloc[-1] - df["best_threshold"].iloc[0])
+        L += ["",
+              f"    The optimum walks {walk:.0f} km/h across these models while the",
+              "    efficiency peak does not move at all. So the gap between the two",
+              "    is NOT the map disagreeing with itself - it is the price of",
+              "    changing gear, and specifically the TRACTION CUT: the actuator's",
+              f"    {p['cost'].actuation_energy:.0f} J barely registers, the "
+              f"{p['cost'].actuator_time_s:g} s of lost traction decides it.",
+              "",
+              f"    That is the least certain input in the study - the actuator is",
+              "    measured hardware, the cut duration is an assumption about the",
+              "    controller. Worth pinning down before quoting a downshift speed.",
+              f"    The whole span is {span:.1f} Wh, so nothing here changes the",
+              "    conclusion about whether the second ratio pays."]
+        if col == "downshift" and sw.best.downshift <= min(vals) + 1e-9:
+            L += ["",
+                  "    Note the optimum is at the bottom of the range, which means",
+                  "    'downshift only just before stopping'. That is what a real AMT",
+                  "    does anyway - it drops to the low ratio to be ready to launch,",
+                  "    not to save energy on the way down."]
+        return L
+
     def _sweep_summary(self, sw, col):
         j = (self._f("cost", "actuator_voltage", 12.0)
              * self._f("cost", "actuator_current", 20.0)
@@ -3018,6 +3075,7 @@ class ShiftOptimiserApp(ctk.CTk):
                 L.append(f"    {n:>4} x  {why if why else '(band constraint)'}")
         L += self._indifference_lines(sw, col)
         L += self._crossover_lines(self.params(), col)
+        L += self._cost_sensitivity_lines(sw, col, self.params())
         L += self._where_it_wins(sw, col)
         L += self._ceiling(sw)
         return "\n".join(L)
