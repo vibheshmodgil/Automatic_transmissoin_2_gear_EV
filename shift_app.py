@@ -734,16 +734,19 @@ class ShiftOptimiserApp(ctk.CTk):
                 out = sc.wot_sweep(self.emap, I["v_target"], I["up_lo"], I["up_hi"],
                                    I["step"], throttle=I["throttle"], **p)
             elif kind == "Efficiency-only optimum":
-                cost = p["cost"]
-                free = sc.ShiftCost(0.0, 0.0, np.inf,
-                                    min_band_kmh=cost.min_band_kmh,
-                                    min_accel_reserve=cost.min_accel_reserve,
-                                    max_accel_loss=cost.max_accel_loss)
+                # The SAME cost model as every other analysis. This used to run with
+                # shifting forced free, on the reasoning that mean_efficiency should
+                # not be polluted by shift costs - but mean_efficiency is shaft output
+                # over electrical input across the motoring samples, and neither the
+                # actuator energy nor the traction cut appears in either integral, so
+                # they cancel out of it anyway. Forcing them to zero changed nothing
+                # about the efficiency ranking and put the net-energy figures this
+                # panel also prints on a different footing from the sweeps - which is
+                # exactly the inconsistency it looked like.
                 out = sc.sweep_efficiency(self.cycle, self.emap,
                                           I["up_lo"], I["up_hi"], max(I["step"], 1.0),
                                           I["dn_lo"], I["dn_hi"], max(I["step"], 1.0),
-                                          min_band=I["min_band"],
-                                          **{**p, "cost": free})
+                                          min_band=I["min_band"], **p)
             elif kind == "Energy bins":
                 kw = dict(veh=p["veh"], motor=p["motor"], gb=p["gb"], num=p["num"],
                           rpm_step=max(50.0, I["bin_rpm"]),
@@ -1932,7 +1935,13 @@ class ShiftOptimiserApp(ctk.CTk):
             self.log("No feasible schedule."); return
 
         b = sw.best
-        e_row = df.loc[df["net_kwh"].idxmin()]       # the energy optimum, for contrast
+        # The energy optimum of the SAME grid, chosen by the same tie-break the
+        # combined-grid sweep uses - idxmin would return whichever of the many
+        # bit-identical ties came first in row order, which is what made this
+        # panel and the sweeps quote different pairs for one answer.
+        _e = sc.best_by_energy(sw.details)
+        e_row = (df[(df["upshift"] == _e.upshift) & (df["downshift"] == _e.downshift)]
+                 .iloc[0] if _e is not None else df.loc[df["net_kwh"].idxmin()])
 
         gs = self.fig.add_gridspec(2, 2, hspace=.34, wspace=.26)
         a_map = self.fig.add_subplot(gs[0, 0])
@@ -2049,7 +2058,9 @@ class ShiftOptimiserApp(ctk.CTk):
             L += [f"  They differ. Going for peak efficiency buys {d_eff:+.3f} points and",
                   f"  costs {d_net:+.1f} Wh of net energy - that gap is the price the rest",
                   "  of the system charges for sitting in the efficient place (shift",
-                  "  interruptions, reflected inertia, pack current)."]
+                  "  actuation and interruption, reflected inertia).",
+                  "  Both figures are computed with the SAME shift cost the sweeps use,",
+                  "  so they are directly comparable with them."]
         rej = full[~full["feasible"]]
         if len(rej):
             L += ["", f"  {len(rej)} of {len(full)} candidates were REJECTED before being",
@@ -2068,6 +2079,7 @@ class ShiftOptimiserApp(ctk.CTk):
               f"  CONVERGED : {sw.converged}"]
         if sw.boundary_note:
             L.append("  NOTE      : " + sw.boundary_note)
+        L += self._indifference_lines(sw)
         return NL.join(L)
 
     # ------------------------------------------------- energy bins
@@ -2524,6 +2536,39 @@ class ShiftOptimiserApp(ctk.CTk):
               "  ShiftResult.mean_efficiency, so every panel quotes the same number."]
         return L
 
+    @staticmethod
+    def _indifference_lines(sw, col=None):
+        """The band of candidates the objective cannot separate.
+
+        Every search in this tool minimises the same quantity on the same cycle,
+        so when the upshift sweep, the downshift sweep and the combined grid name
+        different winners the reason is never that they disagree about physics -
+        it is that the objective is flat and each search reported the argmin of a
+        different slice through the same plateau. Quoting the band makes that
+        visible instead of leaving three numbers to look contradictory.
+        """
+        try:
+            band = sw.indifference()
+        except Exception:
+            return []
+        if not band["n"]:
+            return []
+        L = ["", "  WHAT THE OBJECTIVE CAN ACTUALLY RESOLVE", "  " + "-" * 56,
+             f"    {band['n']} of {int(sw.table['feasible'].sum())} feasible candidates "
+             f"are within {1000*band['tol_kwh']:.1f} Wh (0.1 %) of the best,",
+             f"    spanning upshift {band['upshift'][0]:g}-{band['upshift'][1]:g} km/h "
+             f"and downshift {band['downshift'][0]:g}-{band['downshift'][1]:g} km/h",
+             f"    over {1000*(band['worst_kwh']-band['best_kwh']):.1f} Wh of net energy."]
+        if band["n"] > 1:
+            L += ["    Inside that band the argmin is decided by the last digit, not by",
+                  "    the physics, so a different sweep picking a different point in it",
+                  "    is not a disagreement. Choose within the band on driveability:",
+                  "    tractive-force continuity for the upshift, shift count for the",
+                  "    downshift."]
+        else:
+            L.append("    The optimum is isolated - this one really is a distinct winner.")
+        return L
+
     def _sweep_summary(self, sw, col):
         j = (self._f("cost", "actuator_voltage", 12.0)
              * self._f("cost", "actuator_current", 20.0)
@@ -2557,6 +2602,14 @@ class ShiftOptimiserApp(ctk.CTk):
                 L.append(f"        spread across feasible set: "
                          f"{spread.min():.4f} - {spread.max():.4f} kWh "
                          f"({100*(spread.max()/spread.min()-1):.2f} %)")
+        if sw.best is not None and col in ("upshift", "downshift"):
+            other = "downshift" if col == "upshift" else "upshift"
+            held = getattr(sw.best, other)
+            if all(abs(getattr(d, other) - held) < 1e-9 for d in sw.details):
+                L += ["", f"  This sweep holds the {other} FIXED at {held:g} km/h and varies",
+                      f"  the {col} only, so its answer is conditional on that value. Use",
+                      "  'Combined grid' to search both at once; the two agree whenever",
+                      "  the band below covers the grid's answer."]
         L += ["", f"  CONVERGED : {sw.converged}"]
         if sw.boundary_note:
             L += ["  WARNING   : " + sw.boundary_note]
@@ -2565,6 +2618,7 @@ class ShiftOptimiserApp(ctk.CTk):
             L += ["", "  Why candidates were rejected:"]
             for why, n in rej["reasons"].value_counts().head(5).items():
                 L.append(f"    {n:>4} x  {why if why else '(band constraint)'}")
+        L += self._indifference_lines(sw, col)
         L += self._where_it_wins(sw, col)
         L += self._ceiling(sw)
         return "\n".join(L)

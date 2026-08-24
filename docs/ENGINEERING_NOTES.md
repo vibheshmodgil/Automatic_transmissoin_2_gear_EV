@@ -980,6 +980,70 @@ Verified by A3 in `verify_model.py` (4 checks): 120 J derived, charged exactly
 40/40 checks still pass.
 
 
+## 7l. Why three analyses named three different winners
+
+Reported from the app: *Efficiency-only* said **22/16** best on efficiency and **20/14**
+best on energy, while the *Downshift sweep* said **4 km/h**. Three answers, one cycle.
+Two causes, one of them a real defect.
+
+### Cause 1 - the efficiency panel was running a different physics (fixed)
+
+`_work()` built a private `ShiftCost(0.0, 0.0, inf)` for *Efficiency-only* and passed that
+instead of the user's. The reasoning was that shift costs should not pollute an efficiency
+ranking - but `mean_efficiency` is shaft output over electrical input across the motoring
+samples, and **neither the actuator energy nor the traction cut appears in either
+integral**, so they cancel out of it already. Forcing them to zero changed nothing about
+the efficiency ranking and put the **net-energy figures the same panel prints** on a
+different footing from every sweep. That is the inconsistency, and it was real:
+
+| | best efficiency | best energy |
+|---|---|---|
+| free shifting (what it used to do) | 22/11, 9.8627 kWh | 22/10, **9.8620 kWh** |
+| the real 120 J + 0.5 s cost | 22/11, 9.9465 kWh | 18/7, **9.8841 kWh** |
+
+The panel now uses the same `cost` object as everything else. Same efficiency answer,
+comparable energy numbers.
+
+### Cause 2 - the argmins were never distinguishable in the first place
+
+They are three different searches, and the objective is flat across all of them:
+
+| analysis | argmin | net kWh | indifference band |
+|---|---|---|---|
+| Upshift sweep (D held at 10) | 18/10 | 9.9068 | U 18-22 |
+| Downshift sweep (U held at 22) | 22/7 | 9.8877 | **D 4-9, spread 0.0 Wh** |
+| Combined grid | 18/7 | 9.8841 | U 18-23, D 4-9 |
+| Efficiency-only (same grid) | 22/11 by efficiency | 9.9465 | U 18-23, D 4-9 - identical |
+
+**Downshift 4 through 9 are bit-identical at every upshift** - the threshold never changes
+the gear sequence there (section 7h), so "4" and "7" are the same answer, not two answers.
+Upshift 18-23 spans 6 Wh of 9,884 Wh: **0.06 %**. An argmin quoted off that is the last
+digit talking.
+
+### The fix - quote the band, not the point
+
+`SweepResult.indifference()` returns every candidate within 0.1 % of the best (well under
+the +-4 % differentiation error bar C7b measures). Every summary in the app now prints it
+under **WHAT THE OBJECTIVE CAN ACTUALLY RESOLVE**, so a reader sees the flat region rather
+than inferring a contradiction from three argmins. The 1-D sweeps additionally state which
+threshold they are holding fixed and that their answer is conditional on it.
+
+`best_by_energy()` is now the single tie-break for "the energy optimum" of a 2-D candidate
+set - among exact ties, widest hysteresis band, then middle upshift. `DataFrame.idxmin()`
+returned whichever tie came first in row order, which is why the panel said 18/4 where the
+grid said 18/7 for one identical number.
+
+Verified by C9 in `verify_model.py` (4 checks): the efficiency panel's energy optimum IS
+the combined grid's, both report the same band, a 1-D sweep held inside the band answers
+inside the band, and the whole disagreement spans 0.036 % of the cycle. 44/44 pass.
+
+**What to actually do with this:** stop reading the argmin. The energy objective has no
+opinion between upshift 18 and 23, and none at all about the downshift below 9. Section 7j
+already settled the upshift on tractive-force continuity (**20 km/h**); the downshift
+should be set on shift count and driveability, and 7-9 km/h keeps the band wide while
+sitting in the flat region.
+
+
 ## 8. Fix order (first four change the answer)
 
 1. **Enforce `downshift < upshift` in every sweep**, not just the combined grid. This alone deletes the headline result.

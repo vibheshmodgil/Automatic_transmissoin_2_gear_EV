@@ -489,6 +489,54 @@ check("C8d a hysteresis band narrower than the minimum is refused",
       f"upshift 12 / downshift 10 (2 km/h band) against a 3 km/h minimum -> "
       f"{r_narrow.reasons[0] if r_narrow.reasons else 'accepted'}")
 
+section("C9 Cross-analysis consistency",
+        "every search minimises the same objective on the same cycle under the same "
+        "shift cost, so they cannot contradict each other. Where their argmins differ "
+        "it must be because the objective is flat there, not because two views "
+        "disagree - and the flat region must be reported identically by both.")
+
+cst = M.ShiftCost(max_shifts_per_hour=120, min_band_kmh=3,
+                  min_accel_reserve=0.5, max_accel_loss=0.10)
+Pc = {**P, "cost": cst}
+grid = M.sweep_grid(cy, em, 8, 42, 2, 4, 30, 2, min_band=3, **Pc)
+effo = M.sweep_efficiency(cy, em, 8, 42, 2, 4, 30, 2, min_band=3, **Pc)
+
+g_e, e_e = M.best_by_energy(grid.details), M.best_by_energy(effo.details)
+check("C9 the efficiency panel's energy optimum IS the combined grid's optimum",
+      (g_e.upshift, g_e.downshift) == (e_e.upshift, e_e.downshift)
+      and abs(g_e.net_kwh - e_e.net_kwh) < 1e-12,
+      f"both {g_e.upshift:g}/{g_e.downshift:g} at {g_e.net_kwh:.6f} kWh - same grid, "
+      f"same cost, one tie-break (best_by_energy)")
+
+gb_, eb_ = grid.indifference(), effo.indifference()
+check("C9b both views report the same indifference band",
+      gb_["n"] == eb_["n"] and gb_["upshift"] == eb_["upshift"]
+      and gb_["downshift"] == eb_["downshift"],
+      f"{gb_['n']} candidates, upshift {gb_['upshift'][0]:g}-{gb_['upshift'][1]:g}, "
+      f"downshift {gb_['downshift'][0]:g}-{gb_['downshift'][1]:g}, within "
+      f"{1000*gb_['tol_kwh']:.1f} Wh")
+
+# a 1-D sweep is conditional on its fixed threshold: held INSIDE the band its
+# answer must land inside the band too. That is the whole reconciliation.
+u_fix = float(gb_["upshift"][0])
+dn = M.sweep_downshift(cy, em, u_fix, 4, 30, 2, **Pc)
+inside = any(abs(m.upshift - dn.best.upshift) < 1e-9
+             and abs(m.downshift - dn.best.downshift) < 1e-9 for m in gb_["members"])
+check("C9c a 1-D sweep held inside the band answers inside the band",
+      inside,
+      f"downshift sweep at upshift {u_fix:g} -> {dn.best.upshift:g}/"
+      f"{dn.best.downshift:g}, which is one of the {gb_['n']} grid points the "
+      f"objective cannot separate")
+
+# and the flatness itself: the whole band must be smaller than the model's own
+# error bar, or "they disagree" would be a real problem rather than a rounding one
+spread = 1000 * (gb_["worst_kwh"] - gb_["best_kwh"])
+check("C9d the disagreement is inside the model's resolution",
+      spread < 50,
+      f"the {gb_['n']} tied schedules span {spread:.1f} Wh of "
+      f"{1000*gb_['best_kwh']:.0f} Wh total ({100*spread/1000/gb_['best_kwh']:.3f} %) - "
+      f"far under the 4 % differentiation error bar C7b measures")
+
 # ======================================================================= END
 print("\n" + "=" * 78)
 n_fail = sum(1 for *_, ok, _ in [(s, n, o, d) for s, n, o, d in RESULTS] if not ok)

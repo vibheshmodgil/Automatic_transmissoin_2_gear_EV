@@ -44,7 +44,7 @@ __all__ = [
     "sweep_downshift", "sweep_grid", "sweep_efficiency", "gear_breakdown",
     "wot_run", "wot_sweep", "tractive_force", "road_load_force",
     "oracle_bound", "shift_decomposition", "counterfactual_point",
-    "accel_capability", "energy_breakdown", "better_gear_per_sample", "efficiency_ridge", "energy_bins",
+    "accel_capability", "best_by_energy", "energy_breakdown", "better_gear_per_sample", "efficiency_ridge", "energy_bins",
 ]
 
 # numpy 1.x / 2.x compatible trapezoid rule (VMI pins numpy==1.26.4)
@@ -524,6 +524,42 @@ class SweepResult:
     boundary_note: str = ""
     details: list = field(default_factory=list)
 
+    def indifference(self, tol_rel: float = None) -> dict:
+        """Every candidate the objective cannot actually tell apart from the best.
+
+        The three searches in this tool - the upshift sweep, the downshift sweep
+        and the combined grid - report different argmins on the same cycle, and
+        that reads as a contradiction. It is not one. Over most of the searched
+        region the objective is flat to a few Wh in ten kWh, so which grid point
+        wins is decided by the last digit, not by the physics. An argmin quoted
+        off a flat objective is an artifact of where the search happened to look.
+
+        This returns the whole set within ``tol_rel`` of the best (default 0.1 %
+        of net energy, well under the +-4 % the speed-differentiation error bar
+        of section 7c already admits), so every view can quote the BAND instead
+        of a point and the views stop appearing to disagree.
+
+        Keys: n, tol_kwh, best_kwh, worst_kwh, upshift (lo, hi),
+        downshift (lo, hi), members.
+        """
+        tol_rel = _INDIFF_REL if tol_rel is None else tol_rel
+        ok = [d for d in self.details
+              if d.feasible and np.isfinite(_objective(d))]
+        if not ok:
+            return dict(n=0, tol_kwh=0.0, best_kwh=np.nan, worst_kwh=np.nan,
+                        upshift=(np.nan, np.nan), downshift=(np.nan, np.nan),
+                        members=[])
+        e = np.array([_objective(r) for r in ok], dtype=float)
+        lo = float(e.min())
+        tol = abs(lo) * float(tol_rel)
+        members = [r for r, x in zip(ok, e) if x <= lo + tol]
+        u = [r.upshift for r in members]
+        d = [r.downshift for r in members]
+        return dict(n=len(members), tol_kwh=tol, best_kwh=lo,
+                    worst_kwh=float(max(_objective(r) for r in members)),
+                    upshift=(min(u), max(u)), downshift=(min(d), max(d)),
+                    members=members)
+
 
 # ---------------------------------------------------------------------------
 # Simulation
@@ -845,6 +881,10 @@ def gradeability_table(speeds=(5, 10, 15, 20, 25, 30, 35, 40), **kw) -> pd.DataF
 # first, which is the bottom of the search range, which then trips the boundary
 # test. That is a tie-breaking artifact, not a boundary optimum - see _finish.
 _TIE_REL = 1e-9
+# Candidates within this relative distance of the best are reported as an
+# indifference BAND rather than ranked against each other - see
+# SweepResult.indifference().
+_INDIFF_REL = 1e-3
 
 
 def _objective(r) -> float:
@@ -919,6 +959,26 @@ def sweep_downshift(cycle, emap, upshift: float, lo=5.0, hi=31.0, step=1.0, **kw
     return _finish(rows, details, vals, "downshift")
 
 
+def best_by_energy(details) -> Optional[ShiftResult]:
+    """The energy optimum of a 2-D candidate set, with ONE tie-break rule.
+
+    Exact ties are the normal case here, not the exception: the downshift
+    threshold has no effect at all over most of its range, so whole blocks of the
+    grid carry bit-identical energy. ``DataFrame.idxmin`` then returns whichever
+    of them happens to be first in row order, which is why two views of the same
+    grid could name 18/4 and 18/7 and look like they disagreed. Among ties this
+    prefers the widest hysteresis band - the most robust schedule of the tied set
+    - and then the middle upshift, and every caller uses it.
+    """
+    ok = [d for d in details if d.feasible and np.isfinite(_objective(d))]
+    if not ok:
+        return None
+    e = np.array([_objective(r) for r in ok], dtype=float)
+    tied = [r for r, x in zip(ok, e) if x <= e.min() + abs(e.min()) * _TIE_REL]
+    tied.sort(key=lambda r: (-(r.upshift - r.downshift), r.upshift))
+    return tied[len(tied) // 2]
+
+
 def sweep_grid(cycle, emap, up_lo=20.0, up_hi=42.0, up_step=1.0,
                dn_lo=5.0, dn_hi=31.0, dn_step=1.0, min_band=1.0, **kw) -> SweepResult:
     """Both thresholds. ``min_band`` enforces a usable hysteresis width (C2)."""
@@ -935,9 +995,7 @@ def sweep_grid(cycle, emap, up_lo=20.0, up_hi=42.0, up_step=1.0,
         return SweepResult(table, None, False, "no feasible candidate", details)
     e = np.array([_objective(r) for r in ok], dtype=float)
     tied = [r for r, x in zip(ok, e) if x <= e.min() + abs(e.min()) * _TIE_REL]
-    # among exact ties prefer the widest hysteresis band, then the middle upshift
-    tied.sort(key=lambda r: (-(r.upshift - r.downshift), r.upshift))
-    best = tied[len(tied) // 2]
+    best = best_by_energy(details)
     u, d = np.asarray(ups), np.asarray(dns)
     notes = []
     if len(tied) > 1:
