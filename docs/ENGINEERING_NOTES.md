@@ -1390,6 +1390,62 @@ the stand-in data the five terms reconcile against the measured total to **0.29 
 Verified by C14 (registry wiring). 62/62 pass.
 
 
+## 7r. Efficiency rising with the downshift speed is the MAP talking
+
+Reported as a fault: in the downshift sweep the threshold speed and the mean efficiency
+rise together, when they were expected to move opposite ways.
+
+### Two things were checked before answering
+
+**Is the ratio being inflated by dropping samples?** `mean_efficiency` is
+`sum(shaft out) / sum(electrical in)` over samples where the map returns a value. A
+schedule that pushed samples into an unmappable region would score higher simply by
+excluding them - the ratio would rise for no physical reason. Measured across four
+schedules: **0.0000 uWh of motoring energy is uncounted**. The ratio covers everything.
+(C15b.)
+
+**Where do the two ratios actually swap places?** That single number decides the direction
+of the curve, and `ratio_crossover()` now reports it:
+
+| load | ratio 19 better below | above that |
+|---|---|---|
+| 0.0 m/s2 (cruise) | **7.0 km/h** | ratio 11 |
+| 0.3 m/s2 | **19.2 km/h** | ratio 11 |
+| 0.6 m/s2 | **31.0 km/h** | ratio 11 |
+
+**The crossover walks up with load - 7 to 31 km/h on this map.** That is the whole answer.
+
+### Why the curve rises
+
+Raising the downshift threshold hands more of the low-speed cycle to ratio 19. If the
+threshold is still *below* the crossover, those samples move into the genuinely better
+ratio and mean efficiency **rises**. Past the crossover the same move costs efficiency and
+the curve turns over. On the stand-in map that turn happens around 11-12 km/h; a cycle with
+more low-speed acceleration sits nearer the 19-31 km/h crossovers and will keep climbing
+much further - which is what the reported run shows, and it is correct.
+
+It is a property of **the map and the cycle's load mix**, not of the code. A dyno map whose
+ridge sits low will show the opposite slope, and that will also be correct.
+
+Both sweep summaries and the efficiency-only panel now print the table above under
+**WHY THE EFFICIENCY CURVE SLOPES THIS WAY**, so the slope is explained next to the curve
+instead of looking like a defect.
+
+### And it still does not decide the energy answer
+
+This is the point 7o and 7q keep making, now with the mechanism attached: efficiency is the
+**motor's share alone**. The actuator energy and the traction cut are outside that ratio -
+neither appears in the numerator or the denominator. So the efficiency curve and the energy
+curve are free to move in opposite directions, and on this duty they do: the map gives back
+about 1.8 Wh and charges about 12.5 Wh in gear changes to collect it.
+
+> **Efficiency rising with the downshift speed and energy rising with it are both true at
+> once.** The first is the map preferring the low ratio at low speed under load; the second
+> is what it costs to keep changing into it.
+
+Verified by C15 in `verify_model.py` (2 checks). 64/64 pass.
+
+
 ## 8. Fix order (first four change the answer)
 
 1. **Enforce `downshift < upshift` in every sweep**, not just the combined grid. This alone deletes the headline result.

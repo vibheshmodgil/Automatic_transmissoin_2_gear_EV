@@ -739,6 +739,41 @@ except Exception as exc:
     check("C14 every analysis has NEEDS, DRAW, a draw method and a _work branch",
           False, f"could not import shift_app: {exc!r}")
 
+section("C15 Efficiency rising with the downshift speed is a map property",
+        "handing more of the cycle to the low ratio raises mean efficiency when the "
+        "ratio crossover is ABOVE the threshold and lowers it when below. The "
+        "crossover walks up with load, so a cycle with low-speed acceleration can "
+        "show efficiency climbing well past the cruise crossover. And the ratio must "
+        "not be inflated by quietly dropping samples it cannot map.")
+
+cr = M.ratio_crossover(em, veh=veh, motor=mot, gb=gb)
+xs = [r["crossover_kmh"] for r in cr.values() if np.isfinite(r["crossover_kmh"])]
+check("C15 the ratio crossover exists and rises with load",
+      len(xs) >= 2 and all(b > a for a, b in zip(xs, xs[1:])),
+      "; ".join(f"{a:.1f} m/s2 -> {r['crossover_kmh']:.1f} km/h"
+                for a, r in cr.items() if np.isfinite(r["crossover_kmh"])))
+
+# mean_efficiency must cover ALL the motoring energy - a ratio computed over a
+# shrinking sample set could rise for no physical reason at all
+Pw = {**P, "cost": M.ShiftCost(max_shifts_per_hour=1e9, min_band_kmh=3,
+                               min_accel_reserve=0.0, max_accel_loss=1.0)}
+worst_drop, effs = 0.0, []
+for d in (4, 10, 14, 18):
+    r = M.simulate(cy, em, 21, d, keep_arrays=True, **Pw)
+    ratios = np.where(r.gear == 1, gb.ratio_1, gb.ratio_2)
+    etas = np.where(r.gear == 1, gb.eta_1, gb.eta_2)
+    _, _, p_w = M.road_load(cy, veh, mot, gb, num, ratios)
+    mot_m = (np.abs(p_w) > num.power_epsilon) & (p_w > 0)
+    e_all = tz(np.where(mot_m, p_w / etas, 0.0), cy.time)
+    e_use = tz(np.where(mot_m & np.isfinite(r.motor_eff), p_w / etas, 0.0), cy.time)
+    worst_drop = max(worst_drop, abs(e_all - e_use) / 3.6e6)
+    effs.append((d, r.mean_efficiency))
+check("C15b mean_efficiency covers every motoring sample - none are dropped",
+      worst_drop * 1000 < 1e-6,
+      f"worst uncounted motoring energy {1e6*worst_drop*1000:.4f} uWh across "
+      f"4 schedules, so the ratio cannot be flattered by exclusion; "
+      + ", ".join(f"D={d}: {e:.4%}" for d, e in effs))
+
 # ======================================================================= END
 print("\n" + "=" * 78)
 n_fail = sum(1 for *_, ok, _ in [(s, n, o, d) for s, n, o, d in RESULTS] if not ok)

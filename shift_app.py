@@ -2340,6 +2340,7 @@ class ShiftOptimiserApp(ctk.CTk):
         if sw.boundary_note:
             L.append("  NOTE      : " + sw.boundary_note)
         L += self._indifference_lines(sw)
+        L += self._crossover_lines(self.params(), "downshift")
         return NL.join(L)
 
     # ------------------------------------------------- energy bins
@@ -2863,6 +2864,60 @@ class ShiftOptimiserApp(ctk.CTk):
             L.append("    The optimum is isolated - this one really is a distinct winner.")
         return L
 
+    def _crossover_lines(self, p, col):
+        """Why the efficiency curve slopes the way it does.
+
+        Without this, an efficiency curve that RISES with the downshift speed
+        reads as a bug - the expectation is that handing more of the cycle to the
+        low ratio must cost efficiency. Whether it does is decided by one number
+        from the map: the speed at which the two ratios swap places. Below it the
+        low ratio is genuinely better, so raising the downshift towards it moves
+        samples into the BETTER gear and mean efficiency climbs. Above it the same
+        move costs efficiency. And the crossover is not one speed - it walks up
+        with load, which is why a cycle with a lot of low-speed acceleration can
+        show efficiency rising far higher than a steady-cruise argument predicts.
+        """
+        try:
+            cr = sc.ratio_crossover(self.emap, veh=p["veh"], motor=p["motor"],
+                                    gb=p["gb"])
+        except Exception:
+            return []
+        L = ["", "  WHY THE EFFICIENCY CURVE SLOPES THIS WAY", "  " + "-" * 56,
+             "    Speed at which the two ratios swap places on the map, by load:"]
+        for a, r in cr.items():
+            c = r["crossover_kmh"]
+            if np.isfinite(c):
+                L.append(f"      at {a:.1f} m/s2 accel : ratio {p['gb'].ratio_1:g} is "
+                         f"better below {c:.1f} km/h, ratio {p['gb'].ratio_2:g} above")
+            else:
+                who = (p["gb"].ratio_1 if r["low_ratio_better_below"]
+                       else p["gb"].ratio_2)
+                L.append(f"      at {a:.1f} m/s2 accel : ratio {who:g} is better at "
+                         f"every speed searched")
+        finite = [r["crossover_kmh"] for r in cr.values()
+                  if np.isfinite(r["crossover_kmh"])]
+        if finite:
+            L += ["",
+                  f"    The crossover WALKS UP WITH LOAD, {min(finite):.0f} to "
+                  f"{max(finite):.0f} km/h here. A drive cycle",
+                  "    mixes loads, so the effective crossover is somewhere in that",
+                  "    span, not at the cruise value."]
+            if col == "downshift":
+                L += ["",
+                      "    So: raising the downshift threshold TOWARDS the crossover",
+                      "    moves low-speed samples into the better ratio and mean",
+                      "    efficiency RISES - that is correct, not a fault. Past the",
+                      "    crossover it falls again. Either way the energy answer can",
+                      "    still go the other way, because efficiency is the motor's",
+                      "    share alone and the shift cost sits outside it.",
+                      "    Use 'Gear comparison' to see the two curves themselves."]
+            else:
+                L += ["",
+                      "    An upshift hands the vehicle to the high ratio, so upshifting",
+                      "    below the crossover gives up efficiency as well as tractive",
+                      "    force. Use 'Gear comparison' to see the two curves."]
+        return L
+
     def _sweep_summary(self, sw, col):
         j = (self._f("cost", "actuator_voltage", 12.0)
              * self._f("cost", "actuator_current", 20.0)
@@ -2932,6 +2987,7 @@ class ShiftOptimiserApp(ctk.CTk):
             for why, n in rej["reasons"].value_counts().head(5).items():
                 L.append(f"    {n:>4} x  {why if why else '(band constraint)'}")
         L += self._indifference_lines(sw, col)
+        L += self._crossover_lines(self.params(), col)
         L += self._where_it_wins(sw, col)
         L += self._ceiling(sw)
         return "\n".join(L)

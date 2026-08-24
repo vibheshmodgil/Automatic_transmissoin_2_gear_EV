@@ -44,7 +44,7 @@ __all__ = [
     "sweep_downshift", "sweep_grid", "sweep_efficiency", "gear_breakdown",
     "wot_run", "wot_sweep", "tractive_force", "road_load_force",
     "oracle_bound", "shift_decomposition", "counterfactual_point",
-    "build_stamp", "accel_capability", "best_by_energy", "fixed_point_thresholds", "sweep_energy_terms", "energy_breakdown", "better_gear_per_sample", "efficiency_ridge", "energy_bins",
+    "build_stamp", "accel_capability", "best_by_energy", "fixed_point_thresholds", "sweep_energy_terms", "energy_breakdown", "better_gear_per_sample", "ratio_crossover", "efficiency_ridge", "energy_bins",
 ]
 
 # numpy 1.x / 2.x compatible trapezoid rule (VMI pins numpy==1.26.4)
@@ -832,6 +832,54 @@ def gear_efficiency_curves(emap: EfficiencyMap, speeds=None, accels=(0.0, 0.3, 0
             rec[gear] = dict(rpm=n, torque=t, eff=np.where(over, np.nan, e), over=over)
         out[a] = rec
     return speeds, out
+
+
+def ratio_crossover(emap: EfficiencyMap, accels=(0.0, 0.3, 0.6),
+                    speeds=None, veh: Vehicle = None, motor: Motor = None,
+                    gb: Gearbox = None) -> dict:
+    """The speed at which the two ratios swap places on efficiency, per load.
+
+    This single number explains the DIRECTION of the efficiency curve in a
+    downshift sweep, and without it that curve looks like a bug. Raising the
+    downshift threshold hands more of the low-speed cycle to the low ratio. If
+    the crossover is above the threshold, that is a move to the BETTER ratio and
+    mean efficiency rises; above the crossover it falls. Which way it goes is a
+    property of the map, not of the code - so a map whose ridge sits high will
+    legitimately show efficiency climbing with the downshift speed, and a map
+    whose ridge sits low will show the opposite.
+
+    Returns per-load crossover speeds plus which ratio wins below the crossover.
+    NaN where the two never swap inside the searched speed range.
+    """
+    veh = veh or Vehicle(); motor = motor or Motor(); gb = gb or Gearbox()
+    speeds = np.asarray(speeds if speeds is not None else np.arange(2, 43, 0.25),
+                        dtype=float)
+    out = {}
+    for a in accels:
+        e = {}
+        for gear in (1, 2):
+            n, t = _steady_point(speeds, a, gear, veh, gb)
+            q, _, _ = emap.query(n, t, np.ones_like(n, dtype=bool))
+            over = (np.abs(t) > motor.envelope(n)) | (np.abs(n) > motor.max_rpm)
+            e[gear] = np.where(over, np.nan, q)
+        d = e[1] - e[2]                      # > 0 where the LOW ratio is better
+        ok = np.isfinite(d)
+        cross, low_wins_below = np.nan, None
+        if ok.sum() > 1:
+            sp, dd = speeds[ok], d[ok]
+            sign = np.sign(dd)
+            flip = np.flatnonzero(sign[:-1] * sign[1:] < 0)
+            if len(flip):
+                i = flip[0]
+                # linear interpolation onto the zero crossing
+                cross = float(sp[i] - dd[i] * (sp[i + 1] - sp[i]) / (dd[i + 1] - dd[i]))
+                low_wins_below = bool(dd[0] > 0)
+            else:
+                low_wins_below = bool(dd[0] > 0)
+        out[a] = dict(crossover_kmh=cross, low_ratio_better_below=low_wins_below,
+                      delta_at_5=float(d[np.argmin(np.abs(speeds - 5))]),
+                      delta_at_15=float(d[np.argmin(np.abs(speeds - 15))]))
+    return out
 
 
 def optimal_gear_map(emap: EfficiencyMap, speed_range=(2.0, 42.0), accel_range=(-0.2, 1.4),
