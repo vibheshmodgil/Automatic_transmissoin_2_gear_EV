@@ -591,6 +591,51 @@ check("C10e the penalty scales with the number of changes",
       f"{1000*many.shift_energy_kwh:.1f} Wh; {few.upshift:g}/{few.downshift:g} makes "
       f"{n_few} -> {1000*few.shift_energy_kwh:.1f} Wh - exactly proportional")
 
+section("C11 The 1-D sweeps must be anchored, not guessed",
+        "a 1-D sweep holds the other threshold fixed, so its answer is only as good "
+        "as that anchor. Anchored on a typed number the two sweeps answer different "
+        "questions and appear to contradict each other and the grid. Alternated to a "
+        "fixed point - each threshold optimal GIVEN the other - they must agree, from "
+        "any starting point.")
+
+gr = M.sweep_grid(cy, em, 8, 42, 1, 4, 30, 1, min_band=3, **Pc)
+starts = (5.0, 10.0, 22.0, 28.0)
+fps = [M.fixed_point_thresholds(cy, em, 8, 42, 1, 4, 30, 1,
+                                start_downshift=d0, **Pc) for d0 in starts]
+check("C11 the fixed point is reached from every starting anchor",
+      all(f["converged"] for f in fps)
+      and len({(f["upshift"], f["downshift"]) for f in fps}) == 1,
+      f"starts {', '.join(f'{d:g}' for d in starts)} all settle on "
+      f"{fps[0]['upshift']:g}/{fps[0]['downshift']:g} in "
+      f"{max(f['rounds'] for f in fps)} rounds or fewer")
+
+fp = fps[0]
+up_s = M.sweep_upshift(cy, em, fp["downshift"], 8, 42, 1, **Pc)
+dn_s = M.sweep_downshift(cy, em, fp["upshift"], 4, 30, 1, **Pc)
+check("C11b anchored there, both 1-D sweeps return the same pair",
+      (up_s.best.upshift, up_s.best.downshift)
+      == (dn_s.best.upshift, dn_s.best.downshift)
+      == (fp["upshift"], fp["downshift"]),
+      f"upshift sweep {up_s.best.upshift:g}/{up_s.best.downshift:g}, downshift sweep "
+      f"{dn_s.best.upshift:g}/{dn_s.best.downshift:g} - one answer, not two")
+
+band = gr.indifference()
+inside = any(abs(m.upshift - fp["upshift"]) < 1e-9
+             and abs(m.downshift - fp["downshift"]) < 1e-9 for m in band["members"])
+check("C11c and that pair is what the combined grid finds",
+      inside,
+      f"fixed point {fp['upshift']:g}/{fp['downshift']:g} vs grid "
+      f"{gr.best.upshift:g}/{gr.best.downshift:g}; inside the grid's "
+      f"{band['n']}-candidate indifference band")
+
+# the failure mode the anchor removes: a typed anchor the gates themselves reject
+dn_bad = M.sweep_downshift(cy, em, 15.0, 4, 30, 1, **Pc)
+check("C11d a typed anchor can be infeasible; the fixed point never is",
+      dn_bad.best is None and up_s.best is not None,
+      "downshift sweep anchored at a typed upshift of 15 km/h has NO feasible "
+      "candidate (15 is itself rejected by the acceleration gate), while the "
+      f"fixed-point anchor {fp['upshift']:g} km/h is by construction an optimum")
+
 # ======================================================================= END
 print("\n" + "=" * 78)
 n_fail = sum(1 for *_, ok, _ in [(s, n, o, d) for s, n, o, d in RESULTS] if not ok)

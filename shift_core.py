@@ -44,7 +44,7 @@ __all__ = [
     "sweep_downshift", "sweep_grid", "sweep_efficiency", "gear_breakdown",
     "wot_run", "wot_sweep", "tractive_force", "road_load_force",
     "oracle_bound", "shift_decomposition", "counterfactual_point",
-    "accel_capability", "best_by_energy", "energy_breakdown", "better_gear_per_sample", "efficiency_ridge", "energy_bins",
+    "accel_capability", "best_by_energy", "fixed_point_thresholds", "energy_breakdown", "better_gear_per_sample", "efficiency_ridge", "energy_bins",
 ]
 
 # numpy 1.x / 2.x compatible trapezoid rule (VMI pins numpy==1.26.4)
@@ -977,6 +977,51 @@ def best_by_energy(details) -> Optional[ShiftResult]:
     tied = [r for r, x in zip(ok, e) if x <= e.min() + abs(e.min()) * _TIE_REL]
     tied.sort(key=lambda r: (-(r.upshift - r.downshift), r.upshift))
     return tied[len(tied) // 2]
+
+
+def fixed_point_thresholds(cycle, emap, up_lo=8.0, up_hi=42.0, up_step=1.0,
+                           dn_lo=4.0, dn_hi=30.0, dn_step=1.0,
+                           start_downshift: float = None, max_rounds: int = 8,
+                           **kw) -> dict:
+    """A self-consistent anchor for the 1-D sweeps.
+
+    A 1-D sweep has to hold the other threshold somewhere, and holding it at a
+    number typed into a box makes the answer conditional on that number. That is
+    what makes the two sweeps appear to contradict each other and the grid: sweep
+    the downshift against a typed upshift of 22 and sweep the upshift against a
+    typed downshift of 10, and neither anchor is where the other sweep says it
+    should be, so neither answer is the answer to the question being asked.
+
+    This alternates the two sweeps - optimise the upshift at the current
+    downshift, then the downshift at that upshift - until neither moves. The
+    result is a coordinate-wise optimum: each threshold is optimal GIVEN the
+    other, which is exactly the property the typed anchor lacks.
+
+    On a separable-enough objective this lands on the combined-grid optimum; when
+    it does not, ``matches_grid`` is the honest signal that the objective has
+    structure a coordinate search cannot see, and the grid should be used. It is
+    two 1-D sweeps per round rather than the grid's full product, so it is cheap.
+
+    Returns upshift, downshift, rounds, path and converged.
+    """
+    d = float(dn_lo if start_downshift is None else start_downshift)
+    path, u = [], np.nan
+    for _ in range(max_rounds):
+        su = sweep_upshift(cycle, emap, d, up_lo, up_hi, up_step, **kw)
+        if su.best is None:
+            break
+        u = su.best.upshift
+        sd = sweep_downshift(cycle, emap, u, dn_lo, dn_hi, dn_step, **kw)
+        if sd.best is None:
+            break
+        path.append((u, sd.best.downshift))
+        d = sd.best.downshift
+        # stop only when the whole PAIR repeats: the downshift settling first is
+        # not convergence, the upshift may still move against the new anchor
+        if len(path) > 1 and path[-1] == path[-2]:
+            break
+    return dict(upshift=u, downshift=d, rounds=len(path), path=path,
+                converged=len(path) > 1 and path[-1] == path[-2])
 
 
 def sweep_grid(cycle, emap, up_lo=20.0, up_hi=42.0, up_step=1.0,

@@ -1124,6 +1124,66 @@ against binned + aux + shift, and the penalty is exactly proportional to the cha
 49/49 pass.
 
 
+## 7n. The 1-D sweeps were anchored on a typed number
+
+From a real-data run: the downshift sweep (upshift held at 22) said **22/4**, the upshift
+sweep (downshift held at 10) said **27/10**, and the combined grid said **21/4**. Three
+answers. The reason is in the two parentheses: **each sweep held the other threshold at
+whatever was typed in the Thresholds box**, and neither typed value was where the other
+sweep said it should be. So the two sweeps were not two views of one question - they were
+answers to two different questions, neither of which anyone had asked.
+
+### The fix - anchor on the fixed point, not on a box
+
+`fixed_point_thresholds()` alternates the two sweeps - optimise the upshift at the current
+downshift, then the downshift at that upshift - until the pair stops moving. Each threshold
+is then optimal **given** the other, which is precisely the property a typed anchor lacks.
+Two 1-D sweeps per round, so it costs a fraction of the grid.
+
+On the stand-in data (grid optimum 18/7):
+
+| typed in the box | old: upshift sweep | old: downshift sweep | new anchor | new: both sweeps |
+|---|---|---|---|---|
+| 22 / 10 | 18/10 (9.9068) | 22/7 (9.8877) | 18/7 | **18/7 (9.8841)** |
+| 32 / 22 | 31/22 (10.1537) | 32/7 (9.9858) | 18/7 | **18/7 (9.8841)** |
+| 15 / 5 | 18/5 (9.8841) | **no feasible candidate** | 18/7 | **18/7 (9.8841)** |
+
+Six answers become one, and it is the grid's. The third row is the sharpest illustration:
+a typed upshift of 15 km/h is itself **rejected by the acceleration gate**, so the whole
+downshift sweep anchored on it had nothing feasible to report. A fixed-point anchor cannot
+do that - it is by construction an optimum of a feasible set.
+
+The control is **SWEEP ANCHOR -> Self-consistent anchor (fixed point)**, on by default.
+Untick it to hold the Thresholds value, which is still the right thing when the question
+really is "what is the best downshift *for this specific upshift*". The summary now says
+which anchor was used, where it came from, and how many rounds it took.
+
+Where coordinate descent and the grid disagree, `matches_grid` is the honest signal that
+the objective has structure a coordinate search cannot see - use the grid then.
+
+### Three reporting defects the same run exposed
+
+| what it printed | why it was wrong |
+|---|---|
+| `Sweep over upshift` above a 645-candidate two-threshold search | the **combined grid** was calling `_sweep_summary(sw, "upshift")`. Now titled `Sweep over both thresholds`. |
+| `net 1.1188 kWh` then `spread across feasible set: 1.1691 - 1.1803` | the best was quoted on **net**, the spread on **consumed**. With regen on those differ by 50 Wh. The spread is now net - the quantity `_objective()` actually ranks on. |
+| `-> -12 % of the gain is lower motor loss, i.e. the operating points genuinely moved into a better part of the map` | the motor-loss column showed the optimum losing **more** in the motor (-1.4 Wh) while the shift term carried the whole result (+11.4 Wh). A negative percentage printed next to a sentence contradicting it. |
+
+That last one was hiding a real finding. On that cycle the downshift optimum **did not win
+on the efficiency map at all** - it won by shifting less, and its mean efficiency was
+*lower* than the schedule it beat (92.56 % against 92.68 %). The block now finds the
+dominant term and names it:
+
+> `-> 102 % of the +11.2 Wh comes from fewer/cheaper gear changes.`
+> `The optimum did NOT win on the efficiency map - it won by shifting less`
+> `(18 changes against 30). The motor term went -1.4 Wh, i.e. the map is against it.`
+
+Verified by C11 in `verify_model.py` (4 checks): the fixed point is reached from every
+starting anchor, both 1-D sweeps then return the same pair, that pair is inside the grid's
+indifference band, and a typed anchor can be infeasible where the fixed point cannot.
+53/53 pass.
+
+
 ## 8. Fix order (first four change the answer)
 
 1. **Enforce `downshift < upshift` in every sweep**, not just the combined grid. This alone deletes the headline result.

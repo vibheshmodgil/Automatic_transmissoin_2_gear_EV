@@ -356,9 +356,10 @@ class ShiftOptimiserApp(ctk.CTk):
         ctk.CTkLabel(parent, text=title, font=ctk.CTkFont(size=11, weight="bold"),
                      text_color=COLORS["primary"]).pack(anchor="w", pady=(16, 4), padx=4)
 
-    def _check(self, parent, label, default):
+    def _check(self, parent, label, default, cmd=True):
         v = ctk.BooleanVar(value=default)
-        ctk.CTkCheckBox(parent, text=label, variable=v, command=self.redraw,
+        ctk.CTkCheckBox(parent, text=label, variable=v,
+                        command=(self.redraw if cmd else None),
                         font=ctk.CTkFont(size=11), checkbox_width=16, checkbox_height=16,
                         border_width=2, text_color=COLORS["text_muted"],
                         fg_color=COLORS["primary"],
@@ -407,6 +408,19 @@ class ShiftOptimiserApp(ctk.CTk):
         self._sec(left, "TIME WINDOW")
         self.disp["window"] = self._menu(left, WINDOWS, WINDOWS[0])
         self.disp["start"] = self._slider(left, "Window start", 0, 100, 0, " %")
+
+        self._sec(left, "SWEEP ANCHOR")
+        # A 1-D sweep has to hold the other threshold somewhere. Holding it at a
+        # typed number makes the answer conditional on that number, which is what
+        # makes the upshift sweep, the downshift sweep and the grid look like they
+        # disagree. Off by default would reproduce that, so it is on.
+        self.disp["self_anchor"] = self._check(
+            left, "Self-consistent anchor (fixed point)", True, cmd=False)
+        ctk.CTkLabel(left, text=("  alternates the two sweeps until neither moves;"
+                                 + chr(10)
+                                 + "  untick to hold the Thresholds value instead"),
+                     font=ctk.CTkFont(size=10), text_color=COLORS["text_muted"],
+                     justify="left").pack(anchor="w", padx=6, pady=(0, 2))
 
         self._sec(left, "EFFICIENCY-MAP DISPLAY")
         # "Colour bar" is only the legend strip; the colours ON the map are the
@@ -708,6 +722,8 @@ class ShiftOptimiserApp(ctk.CTk):
             bin_rpm=self._f("bin", "bin_rpm", 500), bin_nm=self._f("bin", "bin_nm", 5),
             ref_mode=int(self._f("bin", "ref_mode", 0)),
             cmp_up=self._f("bin", "cmp_up", 32), cmp_dn=self._f("bin", "cmp_dn", 22),
+            self_anchor=bool(self.disp["self_anchor"].get())
+            if "self_anchor" in self.disp else True,
             v_target=self._f("run", "v_target", 30),
             throttle=self._f("run", "throttle", 1.0),
         )
@@ -719,12 +735,36 @@ class ShiftOptimiserApp(ctk.CTk):
             if kind == "Single strategy":
                 out = sc.simulate(self.cycle, self.emap, I["upshift"], I["downshift"],
                                   keep_arrays=True, **p)
-            elif kind == "Upshift sweep":
-                out = sc.sweep_upshift(self.cycle, self.emap, I["downshift"],
-                                       I["up_lo"], I["up_hi"], I["step"], **p)
-            elif kind == "Downshift sweep":
-                out = sc.sweep_downshift(self.cycle, self.emap, I["upshift"],
-                                         I["dn_lo"], I["dn_hi"], I["step"], **p)
+            elif kind in ("Upshift sweep", "Downshift sweep"):
+                # A 1-D sweep must hold the OTHER threshold somewhere, and holding
+                # it at a typed number makes the answer conditional on that number
+                # - which is why sweeping the downshift against a typed 22 and the
+                # upshift against a typed 10 produced two answers that agreed with
+                # each other and with the grid only by luck. Anchor instead on the
+                # coordinate-wise fixed point, where each threshold is optimal
+                # GIVEN the other. Falls back to the typed value on request.
+                anchor = None
+                if I.get("self_anchor", True):
+                    anchor = sc.fixed_point_thresholds(
+                        self.cycle, self.emap, I["up_lo"], I["up_hi"], I["step"],
+                        I["dn_lo"], I["dn_hi"], I["step"],
+                        start_downshift=I["downshift"], **p)
+                    # if the gates leave nothing feasible anywhere, the iteration
+                    # has no optimum to anchor on - fall back rather than pass NaN
+                    if not (np.isfinite(anchor["upshift"])
+                            and np.isfinite(anchor["downshift"])):
+                        anchor = None
+                if kind == "Upshift sweep":
+                    held = anchor["downshift"] if anchor else I["downshift"]
+                    out = sc.sweep_upshift(self.cycle, self.emap, held,
+                                           I["up_lo"], I["up_hi"], I["step"], **p)
+                else:
+                    held = anchor["upshift"] if anchor else I["upshift"]
+                    out = sc.sweep_downshift(self.cycle, self.emap, held,
+                                             I["dn_lo"], I["dn_hi"], I["step"], **p)
+                out.anchor = anchor
+                out.typed_anchor = (I["downshift"] if kind == "Upshift sweep"
+                                    else I["upshift"])
             elif kind == "Combined grid":
                 out = sc.sweep_grid(self.cycle, self.emap,
                                     I["up_lo"], I["up_hi"], I["step"],
@@ -1185,7 +1225,7 @@ class ShiftOptimiserApp(ctk.CTk):
                 color=COLORS["text_muted"],
                 bbox=dict(boxstyle="round,pad=.3", fc=COLORS["plot_bg"],
                           ec=COLORS["border"], lw=.7, alpha=.85))
-        self.log(self._sweep_summary(sw, "upshift"))
+        self.log(self._sweep_summary(sw, "both thresholds"))
         self.say(("Converged: " if sw.converged else "NOT converged: ") +
                  f"best {sw.best.upshift:g}/{sw.best.downshift:g}",
                  "ok" if sw.converged else "warn")
@@ -2633,7 +2673,10 @@ class ShiftOptimiserApp(ctk.CTk):
                   f"        shift cost paid {1000*(b.shift_energy_kwh+b.interrupt_energy_kwh):.1f} Wh "
                   f"({1000*b.shift_energy_kwh:.1f} Wh actuator "
                   f"+ {1000*b.interrupt_energy_kwh:.1f} Wh traction cut)"]
-            spread = sw.table.loc[sw.table["feasible"], "consumed_kwh"]
+            # net, not consumed: net is what _objective() ranks on, and quoting a
+            # consumed spread beside a net best is how two numbers that describe
+            # one sweep end up disagreeing
+            spread = sw.table.loc[sw.table["feasible"], "net_kwh"]
             if len(spread) > 1:
                 L.append(f"        spread across feasible set: "
                          f"{spread.min():.4f} - {spread.max():.4f} kWh "
@@ -2642,9 +2685,25 @@ class ShiftOptimiserApp(ctk.CTk):
             other = "downshift" if col == "upshift" else "upshift"
             held = getattr(sw.best, other)
             if all(abs(getattr(d, other) - held) < 1e-9 for d in sw.details):
-                L += ["", f"  This sweep holds the {other} FIXED at {held:g} km/h and varies",
-                      f"  the {col} only, so its answer is conditional on that value. Use",
-                      "  'Combined grid' to search both at once; the two agree whenever",
+                a = getattr(sw, "anchor", None)
+                typed = getattr(sw, "typed_anchor", None)
+                L += ["", f"  ANCHOR: the {other} is held at {held:g} km/h."]
+                if a:
+                    L += [f"  That is the SELF-CONSISTENT value, not a typed one: alternating",
+                          f"  the two sweeps from {typed:g} km/h settled on "
+                          f"{a['upshift']:g}/{a['downshift']:g} after {a['rounds']} rounds",
+                          f"  ({'stable' if a['converged'] else 'STILL MOVING - raise max_rounds'}), "
+                          "so each threshold here is optimal",
+                          "  given the other. Anchoring on a typed number instead is what made",
+                          "  this sweep, the other sweep and the grid appear to disagree."]
+                    if typed is not None and abs(typed - held) > 1e-9:
+                        L.append(f"  Your Thresholds box says {typed:g} km/h; that value is not "
+                                 f"self-consistent here.")
+                else:
+                    L += [f"  Taken from the Thresholds box, so this answer is CONDITIONAL on it.",
+                          "  Tick 'Self-consistent anchor' to alternate the two sweeps to a",
+                          "  fixed point instead - that is what makes them agree with the grid."]
+                L += ["  Use 'Combined grid' to search both at once; the two agree whenever",
                       "  the band below covers the grid's answer."]
         L += ["", f"  CONVERGED : {sw.converged}"]
         if sw.boundary_note:
@@ -2701,15 +2760,41 @@ class ShiftOptimiserApp(ctk.CTk):
             L.append(f"    {label:<26}{bb[key]:10.4f}{bw[key]:10.4f}{d:+10.1f} Wh")
         L += [f"    {'mean motor efficiency':<26}{bb['efficiency']:9.2%}"
               f"{bw['efficiency']:10.2%}"
-              f"{100*(bb['efficiency']-bw['efficiency']):+9.2f} pts",
-              "",
-              f"    -> {100*1000*(bw['motor']-bb['motor'])/total:.0f} % of the gain is "
-              f"lower motor loss, i.e. the operating",
-              "       points genuinely moved into a better part of the map.",
-              "       That gain is spread over every loaded sample, which is why it is",
-              "       not visible in 'Shift movement' - that view draws only the "
-              f"{rb.upshifts + rb.downshifts} shift",
-              "       events. Use 'Points on map' to see the cloud move."]
+              f"{100*(bb['efficiency']-bw['efficiency']):+9.2f} pts", ""]
+
+        # Name the term that ACTUALLY carried it. Asserting "the operating points
+        # moved into a better part of the map" while the motor-loss column shows
+        # the optimum losing MORE in the motor prints a negative percentage next
+        # to a sentence contradicting it.
+        terms = {k: 1000 * (bw[k] - bb[k])
+                 for k in ("wheel", "gearbox", "motor", "aux", "shift")}
+        key, dom = max(terms.items(), key=lambda kv: abs(kv[1]))
+        names = {"wheel": "less work demanded at the wheel",
+                 "gearbox": "lower gearbox loss", "motor": "lower MOTOR loss",
+                 "aux": "the auxiliary load", "shift": "fewer/cheaper gear changes"}
+        L.append(f"    -> {100*dom/total:.0f} % of the {total:+.1f} Wh comes from "
+                 f"{names[key]}.")
+        if key == "motor":
+            L += ["       The operating points genuinely moved into a better part of the",
+                  "       map. That gain is spread over every loaded sample, which is why",
+                  "       it is not visible in 'Shift movement' - that view draws only the",
+                  f"       {rb.upshifts + rb.downshifts} shift events. Use 'Points on map' "
+                  "to see the cloud move."]
+        elif key == "shift":
+            m = terms["motor"]
+            L += ["       The optimum did NOT win on the efficiency map - it won by",
+                  f"       shifting less ({rb.upshifts + rb.downshifts} changes against "
+                  f"{rw.upshifts + rw.downshifts}).",
+                  f"       The motor term went {m:+.1f} Wh, i.e. the map is "
+                  f"{'against' if m < 0 else 'with'} it.",
+                  "       Read this as a shift-count result, not a map result: on this",
+                  "       cycle the threshold is worth more for what it avoids doing than",
+                  "       for where it puts the motor."]
+        else:
+            L += [f"       The efficiency map is not what separates these two schedules;",
+                  f"       the motor term is only {terms['motor']:+.1f} Wh of the "
+                  f"{total:+.1f} Wh.",
+                  "       Do not read this sweep as an efficiency result."]
         return L
 
     def _ceiling(self, sw):
