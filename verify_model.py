@@ -711,6 +711,34 @@ check("C13e every summary can name the build that produced it",
       M.build_stamp().startswith("shift_core ") and len(M.build_stamp()) > 12,
       M.build_stamp())
 
+section("C14 Every analysis is fully registered",
+        "an analysis name keys three registries and a dispatch branch. Missing one "
+        "reached the user as a KeyError inside a Tk click handler - a traceback in "
+        "the console and a dead button in the UI - which no physics check could "
+        "catch. Import the app and verify the wiring.")
+try:
+    import shift_app as APP
+    missing_needs = [a for a in APP.ANALYSES if a not in APP.NEEDS]
+    missing_draw = [a for a in APP.ANALYSES if a not in APP.ShiftOptimiserApp.DRAW]
+    missing_meth = [a for a in APP.ANALYSES
+                    if a in APP.ShiftOptimiserApp.DRAW
+                    and not hasattr(APP.ShiftOptimiserApp,
+                                    APP.ShiftOptimiserApp.DRAW[a])]
+    src = (Path(M.__file__).parent / "shift_app.py").read_text(encoding="utf-8")
+    body = src[src.index("def _work(self, kind, I):"):src.index("def _drain(self)")]
+    no_branch = [a for a in APP.ANALYSES
+                 if ('"' + a + '"') not in body and a not in APP.WORK_EXEMPT]
+    check("C14 every analysis has NEEDS, DRAW, a draw method and a _work branch",
+          not (missing_needs or missing_draw or missing_meth or no_branch),
+          f"{len(APP.ANALYSES)} analyses checked; "
+          + ("all wired" if not (missing_needs or missing_draw or missing_meth
+                                 or no_branch)
+             else f"NEEDS {missing_needs} DRAW {missing_draw} "
+                  f"method {missing_meth} branch {no_branch}"))
+except Exception as exc:
+    check("C14 every analysis has NEEDS, DRAW, a draw method and a _work branch",
+          False, f"could not import shift_app: {exc!r}")
+
 # ======================================================================= END
 print("\n" + "=" * 78)
 n_fail = sum(1 for *_, ok, _ in [(s, n, o, d) for s, n, o, d in RESULTS] if not ok)

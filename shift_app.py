@@ -72,11 +72,22 @@ NEEDS = {                        # analysis -> required data keys
     "Downshift sweep": ("cycle", "map"),
     "Combined grid": ("cycle", "map"),
     "Efficiency-only optimum": ("cycle", "map"),
+    "Loss breakdown": ("cycle", "map"),
     "Energy bins": ("cycle", "map"),
     "Gradeability": (),
     "Acceleration run": ("map",),
     "Efficiency map": ("map",),
 }
+
+# Analyses that need no computation on the worker thread: _work() falls through
+# to `out = None` and the draw method reads the map straight from self.emap.
+# Declared here so the exemption is visible in the code rather than hidden in a
+# test's assumptions.
+WORK_EXEMPT = ("Efficiency map",)
+
+_missing = [a for a in ANALYSES if a not in NEEDS]
+if _missing:                     # DRAW is checked the same way below its own def
+    raise RuntimeError("analyses missing a NEEDS entry: " + ", ".join(_missing))
 
 FIELDS = [
     # (section, label, attr, default, kind)
@@ -606,7 +617,7 @@ class ShiftOptimiserApp(ctk.CTk):
             "warn": COLORS["warning"], "err": COLORS["danger"]}[kind])
 
     def _refresh_checklist(self, *_):
-        need = NEEDS[self.analysis.get()]
+        need = NEEDS.get(self.analysis.get(), ("cycle", "map"))
         have = {"cycle": self.cycle is not None, "map": self.emap is not None}
         name = {"cycle": "drive cycle", "map": "efficiency map"}
         if not need:
@@ -688,7 +699,7 @@ class ShiftOptimiserApp(ctk.CTk):
     # ------------------------------------------------------------------- run
     def run(self):
         kind = self.analysis.get()
-        for k in NEEDS[kind]:
+        for k in NEEDS.get(kind, ("cycle", "map")):
             if (k == "cycle" and self.cycle is None) or (k == "map" and self.emap is None):
                 self.say(f"Load the {'drive cycle' if k == 'cycle' else 'efficiency map'} first",
                          "err")
@@ -2951,12 +2962,23 @@ class ShiftOptimiserApp(ctk.CTk):
             return []
 
         (rb, bb), (rw, bw) = runs["best"], runs["worst"]
-        total = 1000 * (rw.net_kwh - rb.net_kwh)
+        # The five terms are CONSUMED-side. Dividing them by a NET difference is
+        # only valid with regen off; with regen on the two schedules also recover
+        # different amounts, so shares came out over 100 % (a "116 % of the gain"
+        # was reported). Attribute against the consumed difference the terms
+        # actually sum to, and reconcile to net on its own line underneath.
+        total = 1000 * (bw["battery"] - bb["battery"])
+        d_rec = 1000 * (rw.recovered_kwh - rb.recovered_kwh)
+        net_gap = 1000 * (rw.net_kwh - rb.net_kwh)
         if abs(total) < 1e-9:
             return []
         L = ["", "  WHAT THE OPTIMUM ACTUALLY WINS ON", "  " + "-" * 56,
              f"    best {rb.upshift:g}/{rb.downshift:g} vs worst "
-             f"{rw.upshift:g}/{rw.downshift:g}  ->  {total:.1f} Wh apart", "",
+             f"{rw.upshift:g}/{rw.downshift:g}  ->  {net_gap:.1f} Wh apart on NET",
+             f"    of which {total:.1f} Wh is consumed"
+             + (f" and {d_rec:+.1f} Wh is a difference in what was recovered"
+                if abs(d_rec) > 0.05 else ""),
+             "",
              f"    {'term':<26}{'best':>10}{'worst':>10}{'diff':>11}"]
         for key, label in (("wheel", "demanded at the wheel"),
                            ("gearbox", "gearbox loss"),
@@ -2965,7 +2987,15 @@ class ShiftOptimiserApp(ctk.CTk):
                            ("shift", "shift actuator + cut")):
             d = 1000 * (bw[key] - bb[key])
             L.append(f"    {label:<26}{bb[key]:10.4f}{bw[key]:10.4f}{d:+10.1f} Wh")
-        L += [f"    {'mean motor efficiency':<26}{bb['efficiency']:9.2%}"
+        L += [f"    {'':<26}{'':>10}{'':>10}{'-' * 10:>11}",
+              f"    {'sum = consumed':<26}{bb['battery']:10.4f}{bw['battery']:10.4f}"
+              f"{total:+10.1f} Wh",
+              f"    {'recovered (regen)':<26}{rb.recovered_kwh:10.4f}"
+              f"{rw.recovered_kwh:10.4f}{-d_rec:+10.1f} Wh",
+              f"    {'NET':<26}{rb.net_kwh:10.4f}{rw.net_kwh:10.4f}"
+              f"{net_gap:+10.1f} Wh",
+              "",
+              f"    {'mean motor efficiency':<26}{bb['efficiency']:9.2%}"
               f"{bw['efficiency']:10.2%}"
               f"{100*(bb['efficiency']-bw['efficiency']):+9.2f} pts", ""]
 
@@ -2989,14 +3019,20 @@ class ShiftOptimiserApp(ctk.CTk):
                   "to see the cloud move."]
         elif key == "shift":
             m = terms["motor"]
-            L += ["       The optimum did NOT win on the efficiency map - it won by",
-                  f"       shifting less ({rb.upshifts + rb.downshifts} changes against "
-                  f"{rw.upshifts + rw.downshifts}).",
-                  f"       The motor term went {m:+.1f} Wh, i.e. the map is "
-                  f"{'against' if m < 0 else 'with'} it.",
-                  "       Read this as a shift-count result, not a map result: on this",
-                  "       cycle the threshold is worth more for what it avoids doing than",
-                  "       for where it puts the motor."]
+            n_b, n_w = rb.upshifts + rb.downshifts, rw.upshifts + rw.downshifts
+            L.append(f"       The optimum makes {n_b} gear changes against {n_w}.")
+            if m < 0:
+                # the map actively prefers the schedule that LOST
+                L += [f"       The motor term went {m:+.1f} Wh, so the efficiency map is",
+                      "       AGAINST the winner - it wins purely by shifting less.",
+                      "       Read this as a shift-count result, not a map result: on",
+                      "       this cycle the threshold is worth more for what it avoids",
+                      "       doing than for where it puts the motor."]
+            else:
+                L += [f"       The motor term agrees ({m:+.1f} Wh), so both effects point",
+                      "       the same way - but shift count is the larger of the two.",
+                      "       Read it as a shift-count result with the map along for the",
+                      "       ride, not as an efficiency finding."]
         else:
             L += [f"       The efficiency map is not what separates these two schedules;",
                   f"       the motor term is only {terms['motor']:+.1f} Wh of the "
@@ -3071,6 +3107,21 @@ class ShiftOptimiserApp(ctk.CTk):
               "    which is why a speed threshold cannot collect them (see 'Optimal gear",
               "    map')."]
         return L
+
+
+# Every analysis name keys THREE registries - ANALYSES (the menu), NEEDS (what
+# data it requires) and DRAW (how to plot it) - plus a branch in _work(). Missing
+# one of them surfaced as a KeyError inside a Tk click handler, i.e. as a
+# traceback in the console and a dead button in the UI. Check at import instead.
+_no_draw = [a for a in ANALYSES if a not in ShiftOptimiserApp.DRAW]
+_no_method = [a for a in ANALYSES
+              if a in ShiftOptimiserApp.DRAW
+              and not hasattr(ShiftOptimiserApp, ShiftOptimiserApp.DRAW[a])]
+if _no_draw or _no_method:
+    raise RuntimeError(
+        "analysis registry incomplete - "
+        + (f"no DRAW entry: {', '.join(_no_draw)}. " if _no_draw else "")
+        + (f"DRAW names a missing method: {', '.join(_no_method)}." if _no_method else ""))
 
 
 if __name__ == "__main__":

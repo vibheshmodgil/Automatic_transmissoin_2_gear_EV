@@ -1314,6 +1314,82 @@ not, an interior optimum is clean, a two-point run does not count as a plateau, 
 summary can name its build. 61/61 pass.
 
 
+## 7q. A dead menu entry, and a share that read 116 %
+
+Two defects, both mine, both from the run on build `f7ac04e`.
+
+### 1. `Loss breakdown` crashed the moment it was selected
+
+```
+File "shift_app.py", line 609, in _refresh_checklist
+    need = NEEDS[self.analysis.get()]
+KeyError: 'Loss breakdown'
+```
+
+An analysis name keys **four** things - `ANALYSES` (the menu), `NEEDS` (what data it
+requires), `DRAW` (how to plot it) and a branch in `_work()`. The new analysis was added to
+three of them. The miss surfaced as a traceback in the console and a dead button in the UI,
+which is why it looked like the feature "still is not working" after pulling: it genuinely
+was not.
+
+Registered, and made structurally impossible to repeat:
+
+* `shift_app` now raises at **import** if any analysis is missing a `NEEDS` or `DRAW` entry,
+  or if `DRAW` names a method that does not exist - so the failure happens on `import`,
+  loudly, instead of inside a Tk click handler;
+* both lookups fall back to `("cycle", "map")` rather than raising, so a future slip
+  degrades instead of killing the handler;
+* `WORK_EXEMPT` declares the one analysis that legitimately has no `_work` branch
+  (`Efficiency map` needs no computation), so the exemption lives in the code rather than
+  in a test's assumptions;
+* **C14** in `verify_model.py` imports the app and checks all four registries for every
+  analysis. No physics check could have caught this; the suite had no UI-wiring check at
+  all.
+
+### 2. "116 % of the +10.8 Wh comes from fewer/cheaper gear changes"
+
+A share cannot exceed 100 %. The five terms from `energy_breakdown()` are **consumed**-side,
+but the denominator was the **net** difference. With regen off those are identical, which
+is why it never showed on the synthetic runs; with regen on the two schedules also recover
+different amounts, so the table stopped summing to its own headline.
+
+Now attributed against the consumed difference the terms actually sum to, and reconciled to
+net explicitly:
+
+```
+    sum = consumed                9.8016   10.1394    +337.8 Wh
+    recovered (regen)             0.5022    0.5068      -4.6 Wh
+    NET                           9.2994    9.6327    +333.3 Wh
+```
+
+The verdict sentence was also contradictory when the motor term happened to agree with the
+winner - it said "did NOT win on the efficiency map" while showing a motor term that
+favoured it. It now separates the two cases: the map against the winner (a pure shift-count
+result) or the map with it (both effects the same way, shift count the larger).
+
+### On "efficiency rises with the downshift speed but so does energy"
+
+That is the correct answer, not a bug, and it is the same finding as 7o. Raising the
+downshift keeps ratio 19 engaged over more of the cycle, which the map likes by a fraction
+of a point, and it multiplies the number of gear changes. Measured on the reported run,
+upshift 21:
+
+| | D = 4 | D = 18 |
+|---|---|---|
+| mean efficiency | 92.54 % | **92.70 %** (better) |
+| gear changes | **18** | 50 |
+| motor loss | 82.1 Wh | **80.3 Wh** (better) |
+| shift cost | **6.6 Wh** | 19.2 Wh |
+| net | **1.0663 kWh** | 1.0771 kWh |
+
+The map gives back **1.8 Wh** and charges **12.5 Wh** to collect it. `mean_efficiency` is
+the motor's share alone - the actuator and the traction cut are not inside that ratio - so
+the two curves *must* be allowed to move in opposite directions. The sum is verified: on
+the stand-in data the five terms reconcile against the measured total to **0.29 Wh**.
+
+Verified by C14 (registry wiring). 62/62 pass.
+
+
 ## 8. Fix order (first four change the answer)
 
 1. **Enforce `downshift < upshift` in every sweep**, not just the combined grid. This alone deletes the headline result.
