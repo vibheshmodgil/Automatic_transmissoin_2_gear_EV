@@ -906,6 +906,19 @@ try:
 
     _I = dict(p={**P, "cost": cst}, upshift=22, downshift=10, up_lo=14, up_hi=26,
               dn_lo=2, dn_hi=12, step=2, min_band=3, self_anchor=True)
+    # the same switches now drive four different views, so exercise all of them
+    for _m in ("_sweep_plot", "_draw_combined", "_draw_effopt", "_sweep_summary",
+               "_where_it_wins", "_ceiling", "_crossover_lines",
+               "_cost_sensitivity_lines", "_effopt_summary", "_map_style",
+               "_colorbar", "_map_background", "_gear_table", "_budget_lines"):
+        if hasattr(APP2.ShiftOptimiserApp, _m):
+            setattr(_Stub, _m, getattr(APP2.ShiftOptimiserApp, _m))
+    _Stub._indifference_lines = staticmethod(
+        APP2.ShiftOptimiserApp._indifference_lines)
+    _Stub.params = lambda self: {**P, "cost": cst}
+    _Stub.disp = {}
+    _Stub._f = lambda self, kind, attr, default: float(default)
+    _Stub._num_disp = APP2.ShiftOptimiserApp._num_disp
     _first = _Stub({})
     _first._work("Loss breakdown", _I)
     _tag, _k, _payload, _p = _first._q.get_nowait()
@@ -921,8 +934,30 @@ try:
                 except Exception as exc:
                     _fails.append(f"energy={_e} eff={_f} total={_t}: {exc!r}")
                 _plt.close(st.fig)
-    check("C19 all 8 switch combinations draw and summarise",
+    check("C19 all 8 switch combinations draw Loss breakdown",
           not _fails, "8 of 8 combinations OK" if not _fails else "; ".join(_fails))
+
+    # and the same switches in the three other views that now honour them
+    _up = M.sweep_upshift(cy, em, 6, 14, 26, 2, cost=cst, **P)
+    _gr = M.sweep_grid(cy, em, 14, 26, 2, 2, 12, 2, min_band=3, cost=cst, **P)
+    _ef = M.sweep_efficiency(cy, em, 14, 26, 2, 2, 12, 2, min_band=3, cost=cst, **P)
+    _f2 = []
+    for _e in (True, False):
+        for _f in (True, False):
+            st = _Stub({"show_energy": _e, "show_eff": _f})
+            for _name, _call in (
+                    ("upshift sweep",
+                     lambda s2=st: s2._sweep_plot(_up, "upshift", "x", "Upshift sweep")),
+                    ("combined grid",
+                     lambda s2=st: s2._draw_combined(_gr, {**P, "cost": cst}, "grid")),
+            ):
+                try:
+                    st.fig.clear(); _call()
+                except Exception as exc:
+                    _f2.append(f"{_name} energy={_e} eff={_f}: {exc!r}")
+            _plt.close(st.fig)
+    check("C19b the same switches work in the sweeps and the combined grid",
+          not _f2, "4 combinations x 2 views OK" if not _f2 else "; ".join(_f2))
 except Exception as exc:
     check("C19 all 8 switch combinations draw and summarise", False, repr(exc))
 

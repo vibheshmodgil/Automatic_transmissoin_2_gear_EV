@@ -454,14 +454,18 @@ class ShiftOptimiserApp(ctk.CTk):
                      font=ctk.CTkFont(size=10), text_color=COLORS["text_muted"],
                      justify="left").pack(anchor="w", padx=6, pady=(0, 2))
 
-        self._sec(left, "LOSS BREAKDOWN")
+        self._sec(left, "ENERGY / EFFICIENCY CURVES")
         # Net energy and mean efficiency answer different questions and move in
         # opposite directions on this duty (7o, 7t). Drawn on one pair of axes they
         # read as a contradiction, so each gets its own switch and either can be
-        # looked at alone. Display only - nothing is re-simulated.
-        self.disp["ls_energy"] = self._check(left, "Net energy curve", True)
-        self.disp["ls_eff"] = self._check(left, "Motor efficiency curve", True)
-        self.disp["ls_total"] = self._check(left, "Total consumed energy", True)
+        # looked at alone. ONE set of switches for every view that draws them -
+        # both sweeps, the combined grid, the efficiency run and Loss breakdown -
+        # because a switch that works in one panel and not the next is worse than
+        # no switch. Display only: nothing is re-simulated.
+        self.disp["show_energy"] = self._check(left, "Net energy", True)
+        self.disp["show_eff"] = self._check(left, "Motor efficiency", True)
+        self.disp["show_total"] = self._check(left, "Total consumed (Loss breakdown)",
+                                              True)
 
         self._sec(left, "EFFICIENCY-MAP DISPLAY")
         # "Colour bar" is only the legend strip; the colours ON the map are the
@@ -528,18 +532,34 @@ class ShiftOptimiserApp(ctk.CTk):
         lo = t0 + (t1 - t0 - span) * self.disp["start"].get() / 100.0
         return lo, lo + span
 
+    def _num_disp(self, key, default):
+        """A numeric display control, with the same tolerance as _disp."""
+        v = self.disp.get(key) if hasattr(self, "disp") else None
+        try:
+            return float(v.get()) if v is not None else float(default)
+        except Exception:
+            return float(default)
+
     def _map_style(self):
-        lo = float(self.disp["eff_lo"].get())
-        hi = float(self.disp["eff_hi"].get())
+        # Read through the tolerant accessors rather than indexing self.disp: the
+        # draw methods are exercised headlessly by the verification suite, where no
+        # Tk variables exist, and a KeyError inside a draw call reaches the user as
+        # a dead panel (that is how the Loss breakdown registry miss surfaced).
+        lo = self._num_disp("eff_lo", 78.0)
+        hi = self._num_disp("eff_hi", 95.0)
         if hi <= lo + 1:
             hi = lo + 1
         return dict(lo=lo, hi=hi,
-                    cbar=self.disp["cbar"].get(),
-                    fill=int(self.disp["fill_levels"].get()) if self.disp["fill_on"].get() else 0,
-                    lines=int(self.disp["line_levels"].get()) if self.disp["lines_on"].get() else 0,
-                    labels=self.disp["clabels"].get(),
-                    envelope=self.disp["envelope"].get(),
-                    cmap=self.disp["cmap"].get())
+                    cbar=self._disp("cbar", True),
+                    fill=int(self._num_disp("fill_levels", 18))
+                    if self._disp("fill_on", True) else 0,
+                    lines=int(self._num_disp("line_levels", 10))
+                    if self._disp("lines_on", False) else 0,
+                    labels=self._disp("clabels", False),
+                    envelope=self._disp("envelope", True),
+                    cmap=(self.disp["cmap"].get()
+                          if hasattr(self, "disp") and "cmap" in self.disp
+                          else "viridis"))
 
     def _ridge(self, ax, signed=False):
         """The best rpm for each torque - the curve a schedule should sit on.
@@ -549,7 +569,7 @@ class ShiftOptimiserApp(ctk.CTk):
         speed. Judging a shift schedule against the peak instead of against this
         curve is the single most common way to reach the wrong conclusion.
         """
-        if not self.disp["ridge"].get():
+        if not self._disp("ridge", False):
             return
         try:
             t, n = sc.efficiency_ridge(self.emap)
@@ -567,7 +587,7 @@ class ShiftOptimiserApp(ctk.CTk):
         the map's best point sits on a 5.8 kW curve, the cycle's cruise band on the
         0.5-2 kW curves, and no choice of ratio crosses between them.
         """
-        if not self.disp["isopower"].get():
+        if not self._disp("isopower", False):
             return
         em = self.emap
         n = np.linspace(1, em.rpm.max(), 400)
@@ -586,9 +606,9 @@ class ShiftOptimiserApp(ctk.CTk):
 
     def _colorbar(self, mappable, ax, label, **kw):
         """Colour bar, unless the user switched it off (or nothing was drawn)."""
-        if mappable is None or not self.disp["cbar"].get():
+        if mappable is None or not self._disp("cbar", True):
             return None
-        if not (self.disp["fill_on"].get() or self.disp["lines_on"].get()):
+        if not (self._disp("fill_on", True) or self._disp("lines_on", False)):
             return None
         return self.fig.colorbar(mappable, ax=ax, label=label, **kw)
 
@@ -1120,7 +1140,7 @@ class ShiftOptimiserApp(ctk.CTk):
                 a.axhline(p["motor"].peak_torque, ls=":", color=COLORS["danger"], lw=1)
                 a.axhline(-p["motor"].peak_torque, ls=":", color=COLORS["danger"], lw=1)
             # gear-change markers, only while few enough to read
-            if self.disp["marks"].get() and 0 < len(shifts) <= 120:
+            if self._disp("marks", True) and 0 < len(shifts) <= 120:
                 for i in shifts:
                     a.axvline(t[i], color=COLORS["accent"], lw=.6, alpha=.35, zorder=0)
             # Horizontal, outside the axes. A rotated label is taller than a 90 px
@@ -1192,8 +1212,13 @@ class ShiftOptimiserApp(ctk.CTk):
         df = sw.table
         ok = df[df["feasible"]]
         bad = df[~df["feasible"]]
-        ax.plot(ok[col], ok["net_kwh"], "o-", color=COLORS["primary"],
-                label="net energy", ms=5, zorder=4)
+        want_e = self._disp("show_energy", True)
+        want_f = self._disp("show_eff", True)
+        if not (want_e or want_f):
+            want_e = True                      # never draw an empty panel
+        if want_e:
+            ax.plot(ok[col], ok["net_kwh"], "o-", color=COLORS["primary"],
+                    label="net energy", ms=5, zorder=4)
         # rejected candidates as bands, not as points: plotted at an arbitrary height
         # they read as data and invite the eye to compare them against the curve
         for xv in bad[col]:
@@ -1201,7 +1226,7 @@ class ShiftOptimiserApp(ctk.CTk):
         if len(bad):
             ax.plot([], [], lw=6, color=COLORS["danger"], alpha=.3,
                     label=f"rejected by the schedule gates ({len(bad)})")
-        if sw.best:
+        if sw.best and want_e:
             b = getattr(sw.best, col)
             ax.scatter([b], [sw.best.net_kwh], s=180, zorder=6,
                        facecolor=COLORS["success"], edgecolor="k", lw=1.2,
@@ -1221,8 +1246,12 @@ class ShiftOptimiserApp(ctk.CTk):
         # The efficiency curve is the whole point and used to be invisible here: the
         # energy axis alone cannot tell you whether a candidate won by moving the
         # operating points somewhere better or by some other term.
-        if "mean_efficiency" in df.columns and len(ok):
-            ax2 = ax.twinx()
+        # shown alone, efficiency takes the LEFT axis rather than a twinned right
+        # one - a lone curve on a right axis reads as half of a comparison that is
+        # not on the plot
+        ax2 = None
+        if want_f and "mean_efficiency" in df.columns and len(ok):
+            ax2 = ax.twinx() if want_e else ax
             ax2.plot(ok[col], ok["mean_efficiency"] * 100, "s--", ms=3, alpha=.85,
                      color=COLORS["warning"], label="mean motor efficiency")
             ax2.set_ylabel("Mean motor efficiency [%]", color=COLORS["warning"])
@@ -1231,17 +1260,30 @@ class ShiftOptimiserApp(ctk.CTk):
                 ax2.scatter([getattr(sw.best, col)], [sw.best.mean_efficiency * 100],
                             s=70, zorder=6, facecolor=COLORS["warning"],
                             edgecolor="k", lw=1)
-        ax.set_xlabel(xlabel); ax.set_ylabel("Net battery energy [kWh]")
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("Net battery energy [kWh]" if want_e
+                      else "Mean motor efficiency [%]")
         ax.grid(alpha=.25)
         h1, l1 = ax.get_legend_handles_labels()
-        h2, l2 = (ax2.get_legend_handles_labels() if "mean_efficiency" in df.columns
-                  and len(ok) else ([], []))
+        h2, l2 = (ax2.get_legend_handles_labels()
+                  if ax2 is not None and ax2 is not ax else ([], []))
         ax.legend(h1 + h2, l1 + l2, fontsize=8.5, loc="upper left", framealpha=.92)
         if sw.best is not None and len(ok) > 1:
             spread = 1000 * (ok["net_kwh"].max() - ok["net_kwh"].min())
-            head = (f"{kind}: best at {getattr(sw.best, col):g} km/h  ·  "
-                    f"{spread:.0f} Wh across the searched range  ·  efficiency "
-                    f"{ok['mean_efficiency'].min():.1%} to {ok['mean_efficiency'].max():.1%}")
+            if want_e and want_f:
+                head = (f"{kind}: best at {getattr(sw.best, col):g} km/h  ·  "
+                        f"{spread:.0f} Wh across the searched range  ·  efficiency "
+                        f"{ok['mean_efficiency'].min():.1%} to "
+                        f"{ok['mean_efficiency'].max():.1%}")
+            elif want_e:
+                head = (f"{kind}: least energy at {getattr(sw.best, col):g} km/h  ·  "
+                        f"{spread:.0f} Wh across the searched range")
+            else:
+                pk = ok.loc[ok["mean_efficiency"].idxmax()]
+                head = (f"{kind}: best MOTOR EFFICIENCY at {pk[col]:g} km/h  ·  "
+                        f"{ok['mean_efficiency'].min():.2%} to "
+                        f"{ok['mean_efficiency'].max():.2%}"
+                        f"  (energy curve hidden)")
         else:
             head = kind
         ax.set_title(head + ("" if sw.converged else "   —   NOT CONVERGED"),
@@ -1261,11 +1303,35 @@ class ShiftOptimiserApp(ctk.CTk):
             return
         # NET, to match the objective every sweep minimises - the colour bar used to
         # say "consumed" while the ranking used net, which is a quiet contradiction
-        piv = df.pivot_table(index="downshift", columns="upshift", values="net_kwh")
-        m = ax.pcolormesh(piv.columns, piv.index, piv.to_numpy(), shading="auto",
+        # A 2-D surface can only paint ONE quantity, so the ENERGY / EFFICIENCY
+        # switches choose which: efficiency alone when the energy curve is switched
+        # off, energy otherwise.
+        want_e = self._disp("show_energy", True)
+        want_f = self._disp("show_eff", True)
+        as_eff = want_f and not want_e
+        field = "mean_efficiency" if as_eff else "net_kwh"
+        piv = df.pivot_table(index="downshift", columns="upshift", values=field)
+        vals = piv.to_numpy() * (100.0 if as_eff else 1.0)
+        m = ax.pcolormesh(piv.columns, piv.index, vals, shading="auto",
                           cmap=self._map_style()["cmap"])
-        self._colorbar(m, ax, "Net battery energy [kWh]")
-        if sw.best:
+        self._colorbar(m, ax, "Mean motor efficiency [%]" if as_eff
+                       else "Net battery energy [kWh]")
+        if as_eff and len(df):
+            # marking the ENERGY optimum on an EFFICIENCY surface is exactly the
+            # mismatch these switches exist to stop
+            pk = df.loc[df["mean_efficiency"].idxmax()]
+            ax.scatter([pk["upshift"]], [pk["downshift"]], marker="*", s=300,
+                       facecolor=COLORS["warning"], edgecolor="k", lw=1.4, zorder=5)
+            ax.annotate("best efficiency  " + format(pk["upshift"], "g") + "/"
+                        + format(pk["downshift"], "g") + chr(10)
+                        + format(pk["mean_efficiency"], ".3%"),
+                        (pk["upshift"], pk["downshift"]),
+                        textcoords="offset points", xytext=(12, 12), fontsize=9,
+                        fontweight="bold", color=COLORS["warning"],
+                        bbox=dict(boxstyle="round,pad=.3", fc=COLORS["plot_bg"],
+                                  ec=COLORS["warning"], lw=1, alpha=.92),
+                        arrowprops=dict(arrowstyle="-", color=COLORS["warning"], lw=1))
+        elif sw.best:
             ax.scatter([sw.best.upshift], [sw.best.downshift], marker="X", s=230,
                        facecolor=COLORS["success"], edgecolor="k", lw=1.4, zorder=5)
             # label at the marker, not in a corner legend the eye has to pair up
@@ -1280,12 +1346,23 @@ class ShiftOptimiserApp(ctk.CTk):
         ax.set_xlabel("1-2 upshift speed [km/h]")
         ax.set_ylabel("2-1 downshift speed [km/h]")
         spread = 1000 * (df["net_kwh"].max() - df["net_kwh"].min())
-        ax.set_title(f"Every threshold pair  ·  best "
-                     f"{sw.best.upshift:g}/{sw.best.downshift:g}  ·  {spread:.0f} Wh "
-                     f"between best and worst"
-                     + ("" if sw.converged else "   —   NOT CONVERGED"),
+        if as_eff:
+            _pk = df.loc[df["mean_efficiency"].idxmax()]
+            _head = ("Every threshold pair, MOTOR EFFICIENCY  |  best "
+                     + format(_pk["upshift"], "g") + "/" + format(_pk["downshift"], "g")
+                     + "  |  " + format(df["mean_efficiency"].min(), ".2%") + " to "
+                     + format(df["mean_efficiency"].max(), ".2%") + "  (energy hidden)")
+        else:
+            _head = ("Every threshold pair  |  best "
+                     + format(sw.best.upshift, "g") + "/"
+                     + format(sw.best.downshift, "g") + "  |  "
+                     + format(spread, ".0f") + " Wh between best and worst")
+        # "converged" is a property of the ENERGY search, so it must not be stamped
+        # across an efficiency surface where it describes nothing on screen
+        _flag = (not as_eff) and (not sw.converged)
+        ax.set_title(_head + ("   —   NOT CONVERGED" if _flag else ""),
                      fontweight="bold", fontsize=11.5,
-                     color=COLORS["text"] if sw.converged else COLORS["danger"])
+                     color=COLORS["danger"] if _flag else COLORS["text"])
         # label the empty region in place rather than under the x-axis, where it
         # collided with the provenance footer
         ax.text(.02, .97,
@@ -1328,7 +1405,7 @@ class ShiftOptimiserApp(ctk.CTk):
             self.fig.text(.5, .5, "Infeasible strategy\n\n" + "\n".join(r.reasons),
                           ha="center", va="center", color=COLORS["danger"])
             self.log("INFEASIBLE\n" + "\n".join("  - " + x for x in r.reasons)); return
-        signed = self.disp["negative"].get()
+        signed = self._disp("negative", True)
         em = self.emap
         act = np.abs(r.motor_torque) > 1e-9
         ax = self.fig.subplots(1, 2, sharex=True, sharey=True)
@@ -1573,7 +1650,7 @@ class ShiftOptimiserApp(ctk.CTk):
         pad = max(2.0, .1 * (allt.max() - allt.min()))
         tmin, tmax = allt.min() - pad, allt.max() + pad
 
-        if not self.disp["negative"].get():
+        if not self._disp("negative", True):
             tmin = 0.0                       # motoring half only, by request
         ax = self.fig.subplots(1, 2, sharex=True, sharey=True)
         act_all = np.abs(r.motor_torque) > 1e-9
@@ -1585,8 +1662,8 @@ class ShiftOptimiserApp(ctk.CTk):
             # DARK colours on purpose: the cycle lives in the bright yellow-green part
             # of viridis, where white and gold at low alpha are invisible.
             for gear, on, colr, mk in (
-                    (1, self.disp["lay_g1"].get(), CLOUD_G1, "o"),
-                    (2, self.disp["lay_g2"].get(), CLOUD_G2, "^")):
+                    (1, self._disp("lay_g1", True), CLOUD_G1, "o"),
+                    (2, self._disp("lay_g2", True), CLOUD_G2, "^")):
                 if not on:
                     continue
                 m = act_all & (r.gear == gear)
@@ -1606,7 +1683,7 @@ class ShiftOptimiserApp(ctk.CTk):
             new_gear = 2 if lab.startswith("Upshift") else 1
             if len(take):
                 cf_n, cf_t = sc.counterfactual_point(r, take, new_gear, p["gb"])
-            for k, i in enumerate(take if self.disp["lay_arrow"].get() else []):
+            for k, i in enumerate(take if self._disp("lay_arrow", True) else []):
                 # solid: what the GEARBOX does - same instant, ratio swapped
                 A.annotate("", xy=(cf_n[k], cf_t[k]),
                            xytext=(r.motor_rpm[i], r.motor_torque[i]),
@@ -1614,7 +1691,7 @@ class ShiftOptimiserApp(ctk.CTk):
                                            color=col, lw=a_lw, alpha=a_al,
                                            shrinkA=0, shrinkB=0), zorder=7)
                 # dotted: what the DRIVER does in the same step - demand moving on
-                if not self.disp["lay_driver"].get():
+                if not self._disp("lay_driver", True):
                     continue
                 A.annotate("", xy=(r.motor_rpm[i + 1], r.motor_torque[i + 1]),
                            xytext=(cf_n[k], cf_t[k]),
@@ -1627,7 +1704,7 @@ class ShiftOptimiserApp(ctk.CTk):
                 # computed whether or not the markers are drawn - the panel title
                 # quotes it, and turning a layer off must not change the numbers
                 gn, gt = sc.counterfactual_point(r, grp, new_gear, p["gb"])
-                if self.disp["lay_marks"].get():
+                if self._disp("lay_marks", True):
                     A.scatter(r.motor_rpm[grp], r.motor_torque[grp], s=26, marker="o",
                               facecolor="none", edgecolor=col, lw=1.3, zorder=8,
                               label="before the shift")
@@ -2084,7 +2161,7 @@ class ShiftOptimiserApp(ctk.CTk):
             # Total consumed on its OWN axis rather than stacked: road work is ~8x
             # every loss combined, so putting it in the stack flattens the four
             # terms that actually move. This shows the total without hiding them.
-            if self._disp("ls_total", True):
+            if self._disp("show_total", True):
                 a1t = a1.twinx()
                 a1t.plot(x, 1000 * df["total"].to_numpy(), color="k", lw=1.8,
                          ls="--", label="total consumed")
@@ -2122,8 +2199,8 @@ class ShiftOptimiserApp(ctk.CTk):
 
             # --- row 3: net and efficiency, both optima marked -----------
             a3 = self.fig.add_subplot(gs[2, c])
-            want_e = self._disp("ls_energy", True)
-            want_f = self._disp("ls_eff", True)
+            want_e = self._disp("show_energy", True)
+            want_f = self._disp("show_eff", True)
             a3.set_xlabel(col + " speed [km/h]")
             if not (want_e or want_f):
                 a3.text(.5, .5, "net energy and efficiency both hidden" + chr(10)
@@ -2343,17 +2420,31 @@ class ShiftOptimiserApp(ctk.CTk):
                 ax.plot([], [], lw=5, color=COLORS["danger"], alpha=.3,
                         label=f"rejected ({len(rej)})")
                 ax.set_xlim(sl_all[col].min() - .5, sl_all[col].max() + .5)
-            ax.plot(sl[col], sl["mean_efficiency"] * 100, "o-", ms=4,
-                    color=COLORS["warning"], label="motor efficiency")
-            ax.scatter([getattr(b, col)], [b.mean_efficiency * 100], s=150, zorder=6,
-                       facecolor=COLORS["warning"], edgecolor="k", lw=1.2)
-            ax.set_ylabel("Mean motor efficiency [%]", color=COLORS["warning"])
-            ax.tick_params(axis="y", labelcolor=COLORS["warning"])
-            ax2 = ax.twinx()
-            ax2.plot(sl[col], sl["net_kwh"], "s--", ms=3, alpha=.75,
-                     color=COLORS["primary"], label="net energy")
-            ax2.set_ylabel("Net energy [kWh]", color=COLORS["primary"])
-            ax2.tick_params(axis="y", labelcolor=COLORS["primary"])
+            # this panel leads with efficiency (it is the efficiency run), so
+            # efficiency keeps the left axis and energy is the twin - and either
+            # can be switched off, in which case the survivor takes the left axis
+            w_f = self._disp("show_eff", True)
+            w_e = self._disp("show_energy", True)
+            if not (w_f or w_e):
+                w_f = True
+            if w_f:
+                ax.plot(sl[col], sl["mean_efficiency"] * 100, "o-", ms=4,
+                        color=COLORS["warning"], label="motor efficiency")
+                ax.scatter([getattr(b, col)], [b.mean_efficiency * 100], s=150,
+                           zorder=6, facecolor=COLORS["warning"], edgecolor="k",
+                           lw=1.2)
+                ax.set_ylabel("Mean motor efficiency [%]", color=COLORS["warning"])
+                ax.tick_params(axis="y", labelcolor=COLORS["warning"])
+            if w_e:
+                ax2 = ax.twinx() if w_f else ax
+                ax2.plot(sl[col], sl["net_kwh"], "s--", ms=3, alpha=.75,
+                         color=COLORS["primary"], label="net energy")
+                ax2.set_ylabel("Net energy [kWh]", color=COLORS["primary"])
+                ax2.tick_params(axis="y", labelcolor=COLORS["primary"])
+                _em = sl.loc[sl["net_kwh"].idxmin()]
+                ax2.scatter([_em[col]], [_em["net_kwh"]], s=110, zorder=6,
+                            marker="X", facecolor=COLORS["primary"], edgecolor="k",
+                            lw=1.1)
             ax.set_xlabel(xlabel)
             ax.set_title(f"{col} at {fixed_col} {fixed_val:g} km/h",
                          fontweight="bold", fontsize=11)

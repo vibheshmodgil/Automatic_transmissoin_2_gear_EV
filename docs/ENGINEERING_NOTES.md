@@ -1727,6 +1727,36 @@ Verified by C19: all **8** switch combinations draw and summarise without raisin
 combination that throws inside a draw call reaches the user as a dead panel, which is
 exactly how the `Loss breakdown` KeyError of 7q surfaced. 74/74 pass.
 
+### The same two switches in every view that draws them
+
+The switches introduced for Loss breakdown now drive **four** views, because a switch that
+works in one panel and not the next is worse than no switch. Section renamed
+**ENERGY / EFFICIENCY CURVES**:
+
+| view | Net energy on | Motor efficiency on | one of them off |
+|---|---|---|---|
+| **Upshift / Downshift sweep** | energy on the left axis | efficiency on the twinned right | the survivor moves to the LEFT axis; the title changes to match ("best MOTOR EFFICIENCY at 10 km/h  (energy curve hidden)") |
+| **Combined grid** | paints the net-energy surface, marks the energy optimum | - | with energy off it paints the **efficiency surface** and marks the **efficiency** optimum, because marking the energy optimum on an efficiency surface is exactly the mismatch these switches exist to stop |
+| **Efficiency-only optimum** | energy on the twin | efficiency keeps the left axis (it is the efficiency run) | the survivor takes the left axis; the energy minimum now gets its own marker, which it never had |
+| **Loss breakdown** | row 3 black trace | row 3 red trace | survivor to the left axis, row title follows |
+
+Turning both off never yields an empty panel: the sweeps and the efficiency run fall back
+to one curve, and Loss breakdown's row 3 says which switches to use.
+
+Two things the combined grid does differently on the efficiency surface, both deliberate.
+It marks the efficiency optimum rather than the energy one. And it drops the
+`NOT CONVERGED` stamp - convergence is a property of the **energy** search, so on an
+efficiency surface it describes nothing on screen.
+
+**Hardening that came with it.** `_map_style()` and eleven other display reads indexed
+`self.disp[...]` directly. An unknown key inside a draw path is a dead panel, which is
+exactly how the `Loss breakdown` registry miss surfaced (7q). All of them now go through
+`_disp()` / `_num_disp()`, which return a documented default rather than raising - and that
+is also what lets the verification suite drive the real draw methods headlessly.
+
+Verified by C19 (2 checks): all 8 switch combinations draw Loss breakdown, and all 4
+combinations draw the sweeps and the combined grid. 75/75 pass.
+
 ## 8. Fix order (first four change the answer)
 
 1. **Enforce `downshift < upshift` in every sweep**, not just the combined grid. This alone deletes the headline result.
