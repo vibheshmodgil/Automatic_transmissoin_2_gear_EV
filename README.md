@@ -10,7 +10,7 @@ every vehicle parameter is an input — point it at your own cycle, map and rati
 ```bash
 python -m pip install -r requirements.txt
 python shift_app.py            # the GUI
-python verify_model.py         # 37 physics checks, exit code 0 if all pass
+python verify_model.py         # 74 independent checks, exit code 0 if all pass
 ```
 
 Windows users can double-click `Run Shift Optimiser.bat`.
@@ -29,7 +29,7 @@ Windows users can double-click `Run Shift Optimiser.bat`.
 |---|---|
 | `shift_core.py` | Physics engine. Pure functions and dataclasses — no UI, no globals. |
 | `shift_app.py` | CustomTkinter front end. Presentation only; every number comes from the core. |
-| `verify_model.py` | Independent verification suite. 75 checks against closed forms and analytic identities. |
+| `verify_model.py` | Independent verification suite. 74 checks against closed forms and analytic identities. |
 | `make_shift_report.py` | Builds a self-contained HTML report with all figures embedded. |
 | `sample_data/` | Synthetic cycle and map, plus the format specification. |
 | `docs/ENGINEERING_NOTES.md` | Full working notes: every defect found, why each decision was made. |
@@ -112,6 +112,11 @@ keeps the motor in the best part of its map" without any other cost in the way.
 Candidates refused by the schedule constraints are drawn as red bars rather than dropped,
 and the summary lists how many went and why — a curve that starts above the speed you
 asked for is always explained.
+
+**Energy breakdown** — where the energy goes for ONE schedule: the budget as a sorted
+bar with shares, a pie of everything that is *not* road work, and the cumulative build-up
+over the cycle with the auxiliary-only line beneath it. Use it before tuning anything —
+on the real cycle road work is 85 % of consumed and no transmission decision touches it.
 
 **Loss breakdown** — where the energy goes as each threshold moves, one column per
 threshold, both anchored at the self-consistent pair so they are slices through one
@@ -255,7 +260,7 @@ the shift schedule cannot matter however it is chosen.
 
 ## Verification
 
-`verify_model.py` runs 75 checks. Each states a prediction derived independently — a
+`verify_model.py` runs 74 checks. Each states a prediction derived independently — a
 closed form, an analytic identity, or a bound physics requires — and compares. Nothing
 calls the code under test to produce its own expected value.
 

@@ -1757,6 +1757,77 @@ is also what lets the verification suite drive the real draw methods headlessly.
 Verified by C19 (2 checks): all 8 switch combinations draw Loss breakdown, and all 4
 combinations draw the sweeps and the combined grid. 75/75 pass.
 
+## 7v. The real cycle is Book3, an Energy breakdown tab, and four checks that were wrong
+
+### The cycle
+
+`Book3.xlsx` is the drive cycle this study is about: **1,801 samples, 1,800 s, 11.81 km,
+max 44.71 km/h**. It is the cycle the reported screenshots came from - they are captioned
+`City cycle.csv (12 km, 0.5 h)`. `real_data/` now holds Book3 as the cycle and Book2's map.
+The 111 km log on Book2 Sheet1 stays in `sample_data/` as a **second dataset**, which turned
+out to be worth more than a spare: running the suite against both is what exposed the
+checks below.
+
+### The efficiency-peak "discrepancy" was a marker in the wrong place
+
+Reported: the downshift analysis and the loss map disagree about the best speed on
+efficiency. Measured first, before changing anything - **they do not**. Both give the
+efficiency peak at **D = 16 km/h, 92.7206 %**, from the same anchor and the same candidate
+set, with `max |difference| = 0.000e+00` across every shared row.
+
+The defect was in the drawing. `_sweep_plot` marked the efficiency curve at
+`sw.best` - the **energy** optimum - so a highlighted dot sat on the efficiency curve at a
+speed that is not where efficiency peaks, while Loss breakdown marked the real peak. Two
+markers, two speeds, one number. And the sweep never named the efficiency peak anywhere at
+all, so there was nothing to reconcile against.
+
+Fixed: the sweep marks the efficiency curve at **its own maximum**, names both optima in
+the title (`least ENERGY at 4 km/h ... best EFFICIENCY at 16 km/h`), and the summary states
+plainly that best efficiency is a different question with its own answer and its own price:
+
+```
+  BEST MOTOR EFFICIENCY is a DIFFERENT question and lands at 16 km/h
+        92.721% there, against 92.541% at the energy optimum
+        net energy there 1.0762 kWh (+10.0 Wh)
+```
+
+### New analysis: `Energy breakdown`
+
+The sweeps ask which threshold is best. This asks the question underneath - what is the
+energy actually spent on - for **one** schedule. Three panels: the budget as a sorted bar
+with shares, a pie of everything that is **not** road work, and the cumulative build-up
+over the cycle with the auxiliary-only line beneath it. Plus the per-gear table and a list
+of which input moves which term. On Book3 at 21/4:
+
+| term | Wh | share of consumed | share of the non-road-work part |
+|---|---|---|---|
+| road work | 988 | **84.5 %** | - |
+| MOTOR loss | 82 | 7.0 % | **42.3 %** |
+| auxiliary | 75 | 6.4 % | 38.6 % |
+| gearbox loss | 31 | 2.6 % | 15.7 % |
+| shift actuator + cut | 7 | 0.6 % | 3.4 % |
+
+### Four checks asserted one dataset's behaviour as an invariant
+
+Swapping the cycle broke them, which is exactly what a second dataset is for. Each is now
+written around its mechanism rather than around a number.
+
+| check | what it claimed | why that is not an invariant | what it asserts now |
+|---|---|---|---|
+| **C7** | the **ordering** of schedules survives smoothing | it does not, on either cycle: the four candidates span 0.6 Wh while smoothing moves the level 117 Wh, so the argmin flips between windows. The original claim was an artifact of the synthetic data | the differentiation error bar **dwarfs** the gap between schedules - a stronger statement, and true |
+| **C8b** | with no acceleration given up, the optimum **is** the crossover | where energy lands above the floor is cycle-dependent: 20 km/h on the stand-in, 27 km/h here | every upshift below the crossover is **refused**, and the first feasible one is the crossover |
+| **C13** | named ranges are "flat to the edge" / "still falling" | a range that is falling on one cycle is a plateau on another | the **definition**: converged means interior, or on an edge the objective is flat to - over whatever ranges the loaded cycle provides |
+| **C16c** | energy below the crossover is under a quarter of the cycle | 1.9 % on the long log, 27.4 % here, because the low ratio also wins on scattered high-load samples **above** the crossover - a speed band is the wrong container for a load-selected set | the energy-weighted invariant: the **high** ratio is the better one for most of the cycle's energy (24.3 % / 35.1 % low-ratio share) |
+
+C7 is the one that matters beyond the suite. It had been certifying that the schedule
+ranking was robust to the model's own numerical error bar. It is not - **the error bar is
+larger than the entire spread between schedules** - which sharpens 7h and 7s rather than
+softening them: not only is the prize small, it is smaller than the noise on the
+measurement of it.
+
+**74/74 pass on Book3 and on the 111 km log.**
+
+
 ## 8. Fix order (first four change the answer)
 
 1. **Enforce `downshift < upshift` in every sweep**, not just the combined grid. This alone deletes the headline result.
