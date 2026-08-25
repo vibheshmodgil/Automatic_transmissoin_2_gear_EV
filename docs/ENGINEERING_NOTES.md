@@ -1699,6 +1699,34 @@ independently of the actuator (0 s -> 0.0 Wh of cut with actuation unchanged at 
 and the printed shares sum to 100.000000 %. 73/73 pass.
 
 
+### Switching the two curves apart, and the total on the same picture
+
+Net energy and mean efficiency answer different questions and, on this duty, move in
+opposite directions (7o, 7t). Drawn on one pair of axes they read as a contradiction. New
+section **LOSS BREAKDOWN** in the display panel, three switches, all display-only so
+toggling is instant on the cached result:
+
+| switch | default | what it does |
+|---|---|---|
+| **Net energy curve** | on | the black net-energy trace in row 3 |
+| **Motor efficiency curve** | on | the red efficiency trace in row 3 |
+| **Total consumed energy** | on | a dashed total-consumed line on row 1 |
+
+Whichever of the two is shown **alone takes the left axis**, rather than sitting on a
+twinned right axis - a lone curve on a right axis looks like half of a comparison that is
+not there. The row title follows: "least energy 2 vs best efficiency 10 - 8 km/h apart"
+with both on, "mean motor efficiency - best at 10 km/h" with one. Turn both off and the
+row says so and points at the switches.
+
+**Total consumed** is drawn on its own axis rather than added to the stack. Road work is
+~8x every loss combined, so stacking it flattens the four terms that actually move with the
+threshold - the same reason it is excluded from row 1 in the first place. On its own axis
+the total is visible without hiding anything.
+
+Verified by C19: all **8** switch combinations draw and summarise without raising. A
+combination that throws inside a draw call reaches the user as a dead panel, which is
+exactly how the `Loss breakdown` KeyError of 7q surfaced. 74/74 pass.
+
 ## 8. Fix order (first four change the answer)
 
 1. **Enforce `downshift < upshift` in every sweep**, not just the combined grid. This alone deletes the headline result.

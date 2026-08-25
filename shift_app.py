@@ -375,6 +375,19 @@ class ShiftOptimiserApp(ctk.CTk):
         ctk.CTkLabel(parent, text=title, font=ctk.CTkFont(size=11, weight="bold"),
                      text_color=COLORS["primary"]).pack(anchor="w", pady=(16, 4), padx=4)
 
+    def _disp(self, key, default=True):
+        """A display switch, tolerant of being asked before the panel is built.
+
+        The draw methods are also exercised headlessly by the verification suite,
+        where self.disp holds no Tk variables at all, so every read has to have a
+        defined answer rather than raising.
+        """
+        v = self.disp.get(key) if hasattr(self, "disp") else None
+        try:
+            return bool(v.get()) if v is not None else bool(default)
+        except Exception:
+            return bool(default)
+
     def _check(self, parent, label, default, cmd=True):
         v = ctk.BooleanVar(value=default)
         ctk.CTkCheckBox(parent, text=label, variable=v,
@@ -440,6 +453,15 @@ class ShiftOptimiserApp(ctk.CTk):
                                  + "  untick to hold the Thresholds value instead"),
                      font=ctk.CTkFont(size=10), text_color=COLORS["text_muted"],
                      justify="left").pack(anchor="w", padx=6, pady=(0, 2))
+
+        self._sec(left, "LOSS BREAKDOWN")
+        # Net energy and mean efficiency answer different questions and move in
+        # opposite directions on this duty (7o, 7t). Drawn on one pair of axes they
+        # read as a contradiction, so each gets its own switch and either can be
+        # looked at alone. Display only - nothing is re-simulated.
+        self.disp["ls_energy"] = self._check(left, "Net energy curve", True)
+        self.disp["ls_eff"] = self._check(left, "Motor efficiency curve", True)
+        self.disp["ls_total"] = self._check(left, "Total consumed energy", True)
 
         self._sec(left, "EFFICIENCY-MAP DISPLAY")
         # "Colour bar" is only the legend strip; the colours ON the map are the
@@ -2024,7 +2046,7 @@ class ShiftOptimiserApp(ctk.CTk):
         energy there" reads as a contradiction rather than as the trade it is.
         Column per threshold; the middle row is the answer.
         """
-        gs = self.fig.add_gridspec(3, 2, hspace=.38, wspace=.30)
+        gs = self.fig.add_gridspec(3, 2, hspace=.40, wspace=.42)
         any_data = False
         for c, col in enumerate(("upshift", "downshift")):
             df = out["terms"][col]
@@ -2059,6 +2081,16 @@ class ShiftOptimiserApp(ctk.CTk):
             a1.stackplot(x, *ys, labels=labs,
                          colors=[cc for _, _, cc in loss_terms], alpha=.92)
             a1.set_ylabel("loss [Wh]")
+            # Total consumed on its OWN axis rather than stacked: road work is ~8x
+            # every loss combined, so putting it in the stack flattens the four
+            # terms that actually move. This shows the total without hiding them.
+            if self._disp("ls_total", True):
+                a1t = a1.twinx()
+                a1t.plot(x, 1000 * df["total"].to_numpy(), color="k", lw=1.8,
+                         ls="--", label="total consumed")
+                a1t.set_ylabel("TOTAL consumed [Wh]", fontsize=9)
+                a1t.tick_params(axis="y", labelsize=8)
+                a1t.legend(fontsize=7, loc="lower right", framealpha=.9)
             a1.set_title(col + " sweep - share of the LOSSES" + chr(10)
                          + "(" + other + " held at " + format(held, "g")
                          + " km/h; road work "
@@ -2090,27 +2122,55 @@ class ShiftOptimiserApp(ctk.CTk):
 
             # --- row 3: net and efficiency, both optima marked -----------
             a3 = self.fig.add_subplot(gs[2, c])
-            a3.plot(x, 1000 * df["net_kwh"], "-o", ms=3.5, color="k", lw=2,
-                    label="net energy")
-            a3.scatter([x[i_best]], [1000 * df["net_kwh"].iloc[i_best]], s=110,
-                       color="k", zorder=3,
-                       label="least energy " + format(x[i_best], "g"))
+            want_e = self._disp("ls_energy", True)
+            want_f = self._disp("ls_eff", True)
             a3.set_xlabel(col + " speed [km/h]")
-            a3.set_ylabel("net [Wh]")
-            a3e = a3.twinx()
-            a3e.plot(x, 100 * df["mean_efficiency"], "-s", ms=3.5,
-                     color=self.TERMS[2][2], lw=1.6, alpha=.85)
-            a3e.scatter([x[i_eff]], [100 * df["mean_efficiency"].iloc[i_eff]], s=110,
-                        marker="X", color=self.TERMS[2][2], zorder=3)
-            a3e.set_ylabel("mean motor efficiency [%]", color=self.TERMS[2][2],
-                           fontsize=9)
-            a3e.tick_params(axis="y", labelcolor=self.TERMS[2][2], labelsize=8)
-            a3.legend(fontsize=7, loc="center left", framealpha=.9)
-            gap = ("the same point" if i_best == i_eff
-                   else format(abs(x[i_eff] - x[i_best]), "g") + " km/h apart")
-            a3.set_title("least energy " + format(x[i_best], "g")
-                         + " vs best efficiency " + format(x[i_eff], "g")
-                         + " - " + gap, fontsize=9)
+            if not (want_e or want_f):
+                a3.text(.5, .5, "net energy and efficiency both hidden" + chr(10)
+                        + "(LOSS BREAKDOWN switches, left panel)",
+                        ha="center", va="center", fontsize=9,
+                        color=COLORS["text_muted"], transform=a3.transAxes)
+                a3.set_yticks([])
+            else:
+                # whichever is shown alone takes the LEFT axis - a lone curve on a
+                # twinned right axis is how a single series ends up looking like
+                # half of a comparison that is not there
+                ax_e = a3 if want_e else None
+                ax_f = (a3.twinx() if want_e else a3) if want_f else None
+                if ax_e is not None:
+                    ax_e.plot(x, 1000 * df["net_kwh"], "-o", ms=3.5, color="k", lw=2,
+                              label="net energy")
+                    ax_e.scatter([x[i_best]], [1000 * df["net_kwh"].iloc[i_best]],
+                                 s=110, color="k", zorder=3,
+                                 label="least energy " + format(x[i_best], "g"))
+                    ax_e.set_ylabel("net [Wh]")
+                    ax_e.legend(fontsize=7, loc="center left", framealpha=.9)
+                if ax_f is not None:
+                    ax_f.plot(x, 100 * df["mean_efficiency"], "-s", ms=3.5,
+                              color=self.TERMS[2][2], lw=1.6, alpha=.85,
+                              label="mean motor efficiency")
+                    ax_f.scatter([x[i_eff]], [100 * df["mean_efficiency"].iloc[i_eff]],
+                                 s=110, marker="X", color=self.TERMS[2][2], zorder=3,
+                                 label="best efficiency " + format(x[i_eff], "g"))
+                    ax_f.set_ylabel("mean motor efficiency [%]",
+                                    color=self.TERMS[2][2], fontsize=9)
+                    ax_f.tick_params(axis="y", labelcolor=self.TERMS[2][2],
+                                     labelsize=8)
+                    if not want_e:
+                        ax_f.legend(fontsize=7, loc="center left", framealpha=.9)
+            if want_e and want_f:
+                gap = ("the same point" if i_best == i_eff
+                       else format(abs(x[i_eff] - x[i_best]), "g") + " km/h apart")
+                ttl = ("least energy " + format(x[i_best], "g")
+                       + " vs best efficiency " + format(x[i_eff], "g") + " - " + gap)
+            elif want_e:
+                ttl = "net energy - least at " + format(x[i_best], "g") + " km/h"
+            elif want_f:
+                ttl = ("mean motor efficiency - best at " + format(x[i_eff], "g")
+                       + " km/h")
+            else:
+                ttl = "both curves hidden"
+            a3.set_title(ttl, fontsize=9)
 
         self.fig.suptitle("Loss breakdown - what moves when a threshold moves",
                           fontsize=12, fontweight="bold")

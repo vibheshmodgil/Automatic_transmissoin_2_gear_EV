@@ -881,6 +881,51 @@ check("C18c the printed percentage shares sum to 100 %",
                zip(("road", "gearbox", "motor", "aux", "shift"), shares))
       + f"  = {100*sum(shares):.6f}%")
 
+section("C19 Every display-switch combination still draws",
+        "the Loss breakdown curves can each be switched off, including all of them "
+        "at once. A combination that raises inside a draw call reaches the user as "
+        "a dead panel, so every combination is exercised here.")
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as _plt
+    import queue as _queue
+    import shift_app as APP2
+
+    class _Stub:
+        TERMS = APP2.ShiftOptimiserApp.TERMS
+        def __init__(self, switches):
+            self.cycle, self.emap, self._sw = cy, em, switches
+            self._q = _queue.Queue(); self.disp = {}
+            self.fig = _plt.figure(figsize=(12, 11))
+        def _disp(self, key, default=True): return self._sw.get(key, default)
+        def log(self, t): pass
+        def say(self, *a, **k): pass
+    for _m in ("_work", "_draw_lossshare", "_lossshare_summary"):
+        setattr(_Stub, _m, getattr(APP2.ShiftOptimiserApp, _m))
+
+    _I = dict(p={**P, "cost": cst}, upshift=22, downshift=10, up_lo=14, up_hi=26,
+              dn_lo=2, dn_hi=12, step=2, min_band=3, self_anchor=True)
+    _first = _Stub({})
+    _first._work("Loss breakdown", _I)
+    _tag, _k, _payload, _p = _first._q.get_nowait()
+    assert _tag == "ok", _payload
+    _fails = []
+    for _e in (True, False):
+        for _f in (True, False):
+            for _t in (True, False):
+                st = _Stub({"ls_energy": _e, "ls_eff": _f, "ls_total": _t})
+                try:
+                    st._draw_lossshare(_payload, _p, "Loss breakdown")
+                    st._lossshare_summary(_payload)
+                except Exception as exc:
+                    _fails.append(f"energy={_e} eff={_f} total={_t}: {exc!r}")
+                _plt.close(st.fig)
+    check("C19 all 8 switch combinations draw and summarise",
+          not _fails, "8 of 8 combinations OK" if not _fails else "; ".join(_fails))
+except Exception as exc:
+    check("C19 all 8 switch combinations draw and summarise", False, repr(exc))
+
 # ======================================================================= END
 print("\n" + "=" * 78)
 n_fail = sum(1 for *_, ok, _ in [(s, n, o, d) for s, n, o, d in RESULTS] if not ok)
