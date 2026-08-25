@@ -37,3 +37,6 @@ CLAUDE.md
 
 # working copies at the top level; the published CAD lives in cad/
 /*.step
+
+# Excel lock files (created while a workbook is open)
+~$*
