@@ -57,6 +57,7 @@ ANALYSES = [
     "Combined grid",
     "Efficiency-only optimum",   # ranked on motor efficiency alone, nothing else
     "Loss breakdown",            # where the energy goes as the threshold moves
+    "Energy breakdown",          # where the energy goes, for ONE schedule
     "Energy bins",               # where the energy goes, and where a schedule moves it
     "Gradeability",
     "Acceleration run",       # one 0 -> V (-> 0) manoeuvre, swept over the shift speed
@@ -73,6 +74,7 @@ NEEDS = {                        # analysis -> required data keys
     "Combined grid": ("cycle", "map"),
     "Efficiency-only optimum": ("cycle", "map"),
     "Loss breakdown": ("cycle", "map"),
+    "Energy breakdown": ("cycle", "map"),
     "Energy bins": ("cycle", "map"),
     "Gradeability": (),
     "Acceleration run": ("map",),
@@ -856,6 +858,14 @@ class ShiftOptimiserApp(ctk.CTk):
                                           I["up_lo"], I["up_hi"], max(I["step"], 1.0),
                                           I["dn_lo"], I["dn_hi"], max(I["step"], 1.0),
                                           min_band=I["min_band"], **p)
+            elif kind == "Energy breakdown":
+                rr = sc.simulate(self.cycle, self.emap, I["upshift"], I["downshift"],
+                                 keep_arrays=True, **p)
+                out = dict(result=rr,
+                           terms=sc.energy_breakdown(rr, self.cycle, veh=p["veh"],
+                                                     motor=p["motor"], gb=p["gb"],
+                                                     elec=p["elec"], num=p["num"]),
+                           gears=sc.gear_breakdown(rr, self.cycle))
             elif kind == "Loss breakdown":
                 # Both thresholds, each anchored at the fixed point, so the two
                 # columns are slices through ONE self-consistent operating point.
@@ -965,6 +975,7 @@ class ShiftOptimiserApp(ctk.CTk):
         "Combined grid": "_draw_combined",
         "Efficiency-only optimum": "_draw_effopt",
         "Loss breakdown": "_draw_lossshare",
+        "Energy breakdown": "_draw_ebd",
         "Energy bins": "_draw_bins",
         "Gradeability": "_draw_gradeability",
         "Acceleration run": "_draw_acceleration",
@@ -1256,10 +1267,16 @@ class ShiftOptimiserApp(ctk.CTk):
                      color=COLORS["warning"], label="mean motor efficiency")
             ax2.set_ylabel("Mean motor efficiency [%]", color=COLORS["warning"])
             ax2.tick_params(axis="y", labelcolor=COLORS["warning"])
-            if sw.best is not None:
-                ax2.scatter([getattr(sw.best, col)], [sw.best.mean_efficiency * 100],
-                            s=70, zorder=6, facecolor=COLORS["warning"],
-                            edgecolor="k", lw=1)
+            # Mark the efficiency curve at ITS OWN maximum, not at the energy
+            # optimum. Putting the marker at sw.best placed a highlighted dot on
+            # the efficiency curve at a speed that is not where efficiency peaks,
+            # so the sweep appeared to disagree with Loss breakdown - which marks
+            # the real peak - about the same number computed from the same data.
+            _pk = ok.loc[ok["mean_efficiency"].idxmax()]
+            ax2.scatter([_pk[col]], [_pk["mean_efficiency"] * 100], s=110,
+                        marker="X", zorder=6, facecolor=COLORS["warning"],
+                        edgecolor="k", lw=1.1,
+                        label=f"best efficiency {_pk[col]:g} km/h")
         ax.set_xlabel(xlabel)
         ax.set_ylabel("Net battery energy [kWh]" if want_e
                       else "Mean motor efficiency [%]")
@@ -1271,10 +1288,10 @@ class ShiftOptimiserApp(ctk.CTk):
         if sw.best is not None and len(ok) > 1:
             spread = 1000 * (ok["net_kwh"].max() - ok["net_kwh"].min())
             if want_e and want_f:
-                head = (f"{kind}: best at {getattr(sw.best, col):g} km/h  ·  "
-                        f"{spread:.0f} Wh across the searched range  ·  efficiency "
-                        f"{ok['mean_efficiency'].min():.1%} to "
-                        f"{ok['mean_efficiency'].max():.1%}")
+                _pk2 = ok.loc[ok["mean_efficiency"].idxmax()]
+                head = (f"{kind}: least ENERGY at {getattr(sw.best, col):g} km/h "
+                        f"({spread:.0f} Wh across the range)  ·  best EFFICIENCY at "
+                        f"{_pk2[col]:g} km/h ({_pk2['mean_efficiency']:.2%})")
             elif want_e:
                 head = (f"{kind}: least energy at {getattr(sw.best, col):g} km/h  ·  "
                         f"{spread:.0f} Wh across the searched range")
@@ -2351,6 +2368,113 @@ class ShiftOptimiserApp(ctk.CTk):
               "           are not at the same x, row 2 says why."]
         return NL.join(L)
 
+    # ------------------------------------------------------ energy breakdown
+    def _draw_ebd(self, out, p, _kind):
+        """Where the cycle's energy goes, for ONE schedule.
+
+        The sweeps ask which threshold is best. This asks the question underneath
+        it - what is the energy actually spent on - and it is the more important
+        one here, because the term a shift schedule can move is a small slice of
+        the total. Drawn once for the Thresholds pair, with each term named, sized
+        and attributed to the input that sets it.
+        """
+        r, b = out["result"], out["terms"]
+        tot = b["battery"]
+        terms = [(k, lb, cc) for k, lb, cc in self.TERMS]
+
+        gs = self.fig.add_gridspec(2, 2, hspace=.36, wspace=.28,
+                                   height_ratios=[1.05, 1.0])
+        # --- 1. the budget as a bar, biggest first -------------------------
+        a1 = self.fig.add_subplot(gs[0, 0])
+        order = sorted(terms, key=lambda t: b[t[0]], reverse=True)
+        names = [lb for _, lb, _ in order]
+        vals = [1000 * b[k] for k, _, _ in order]
+        cols = [cc for _, _, cc in order]
+        y = np.arange(len(order))
+        a1.barh(y, vals, color=cols, alpha=.92)
+        a1.set_yticks(y)
+        a1.set_yticklabels(names, fontsize=9)
+        a1.invert_yaxis()
+        a1.set_xlabel("Wh over the cycle")
+        for yy, v in zip(y, vals):
+            a1.text(v + max(vals) * .012, yy, f"{v:,.0f} Wh  ({100*v/(1000*tot):.1f} %)",
+                    va="center", fontsize=8.5)
+        a1.set_xlim(0, max(vals) * 1.34)
+        a1.set_title(f"Energy budget - {1000*tot:,.0f} Wh consumed"
+                     + (f", {1000*r.recovered_kwh:,.0f} Wh recovered"
+                        if r.recovered_kwh > 0 else ""),
+                     fontweight="bold", fontsize=10.5)
+
+        # --- 2. the same split with road work removed ----------------------
+        # Road work is what the vehicle costs, not what the powertrain costs. It
+        # is 4/5 of the total and no transmission decision touches it, so the
+        # engineering question lives entirely in the remainder.
+        a2 = self.fig.add_subplot(gs[0, 1])
+        loss = [(k, lb, cc) for k, lb, cc in terms if k != "wheel"]
+        lv = [b[k] for k, _, _ in loss]
+        ltot = sum(lv)
+        a2.pie(lv, labels=[lb for _, lb, _ in loss],
+               colors=[cc for _, _, cc in loss], autopct="%1.1f%%",
+               startangle=90, counterclock=False,
+               textprops=dict(fontsize=8.5),
+               wedgeprops=dict(edgecolor="white", lw=1.2))
+        a2.set_title(f"Of the {1000*ltot:,.0f} Wh that is NOT road work"
+                     + chr(10) + f"(road work {100*b['wheel']/tot:.0f} % of consumed "
+                     + "is the vehicle, not the gearbox)", fontsize=9.5)
+
+        # --- 3. how the budget builds up over the cycle --------------------
+        a3 = self.fig.add_subplot(gs[1, :])
+        t = self.cycle.time
+        pb = np.nan_to_num(r.battery_power)
+        cum = np.concatenate([[0.0], np.cumsum(np.maximum(pb[:-1], 0.0) * np.diff(t))])
+        a3.plot(t / 60.0, cum / 3.6e3, color="k", lw=2, label="cumulative consumed")
+        if r.recovered_kwh > 0:
+            rec = np.concatenate([[0.0],
+                                  np.cumsum(np.maximum(-pb[:-1], 0.0) * np.diff(t))])
+            a3.plot(t / 60.0, (cum - rec) / 3.6e3, color=self.TERMS[4][2], lw=1.8,
+                    ls="--", label="cumulative NET (after regen)")
+        aux = self.TERMS[3][2]
+        a3.plot(t / 60.0, p["elec"].aux_load * (t - t[0]) / 3.6e3, color=aux, lw=1.6,
+                ls=":", label=f"auxiliary alone ({p['elec'].aux_load:.0f} W)")
+        a3.set_xlabel("time [min]")
+        a3.set_ylabel("energy [Wh]")
+        a3.grid(alpha=.25)
+        a3.legend(fontsize=8.5, loc="upper left", framealpha=.92)
+        a3.set_title("How the budget accumulates - the auxiliary line is what the "
+                     "vehicle spends standing still", fontsize=9.5)
+
+        self.fig.suptitle(f"Energy breakdown at upshift {r.upshift:g} / downshift "
+                          f"{r.downshift:g} km/h  -  {r.wh_per_km:.1f} Wh/km over "
+                          f"{r.distance_km:.2f} km",
+                          fontsize=12, fontweight="bold")
+        self.log(self._ebd_summary(out, p))
+        self.say(f"{r.wh_per_km:.1f} Wh/km, {100*b['wheel']/tot:.0f} % of it road work",
+                 "ok")
+
+    def _ebd_summary(self, out, p):
+        NL = chr(10)
+        r, b = out["result"], out["terms"]
+        tot = b["battery"]
+        L = [f"Energy breakdown at {r.upshift:g}/{r.downshift:g} km/h", "=" * 74,
+             "  " + sc.build_stamp(), ""]
+        L += self._budget_lines(r, p)[1:]      # drop its leading blank
+        gb_ = out.get("gears")
+        if gb_ is not None and len(gb_):
+            L += ["", "  AND WHERE THE MOTOR SPENT IT", "  " + "-" * 66]
+            L += self._gear_table(r)
+        L += ["",
+              "  WHAT ANY OF THIS CAN BE CHANGED BY", "  " + "-" * 66,
+              "    road work      the vehicle - mass, CdA, Crr, grade. Nothing the",
+              "                   transmission does touches it.",
+              "    auxiliary      one number, Electrical > Auxiliary load [W], times",
+              "                   the cycle duration. It does not care what gear is in.",
+              "    MOTOR loss     the only term a shift schedule can move, and the",
+              "                   only reason the sweeps exist.",
+              "    gearbox loss   two numbers, Gearbox > Efficiency gear 1 / 2.",
+              "    shift cost     Shift cost > actuator V x A x s, plus the traction",
+              "                   cut. Decides the threshold, not the total."]
+        return NL.join(L)
+
     # -------------------------------------------- efficiency-only optimum
     def _draw_effopt(self, sw, p, _kind):
         """Rank every schedule on motor efficiency alone.
@@ -3289,6 +3413,26 @@ class ShiftOptimiserApp(ctk.CTk):
                 L.append(f"        spread across feasible set: "
                          f"{spread.min():.4f} - {spread.max():.4f} kWh "
                          f"({100*(spread.max()/spread.min()-1):.2f} %)")
+            # Name the EFFICIENCY optimum as well. The sweep reported only the
+            # energy argmin, while Loss breakdown named the efficiency peak, so
+            # the same data read as two different answers to one question.
+            _ok = sw.table[sw.table["feasible"]]
+            if col in ("upshift", "downshift") and len(_ok) and                     "mean_efficiency" in _ok:
+                _pk = _ok.loc[_ok["mean_efficiency"].idxmax()]
+                L += ["",
+                      f"  BEST MOTOR EFFICIENCY is a DIFFERENT question and lands at "
+                      f"{_pk[col]:g} km/h",
+                      f"        {_pk['mean_efficiency']:.3%} there, against "
+                      f"{b.mean_efficiency:.3%} at the energy optimum",
+                      f"        net energy there {_pk['net_kwh']:.4f} kWh "
+                      f"({1000*(_pk['net_kwh']-b.net_kwh):+.1f} Wh)"]
+                if abs(_pk[col] - getattr(b, col)) < 1e-9:
+                    L.append("        - the same speed, so nothing is being traded")
+                else:
+                    L.append("        - see WHY THE EFFICIENCY CURVE SLOPES THIS WAY "
+                             "below, and")
+                    L.append("          'Loss breakdown', which marks both optima on "
+                             "one plot")
         if sw.best is not None and col in ("upshift", "downshift"):
             other = "downshift" if col == "upshift" else "upshift"
             held = getattr(sw.best, other)

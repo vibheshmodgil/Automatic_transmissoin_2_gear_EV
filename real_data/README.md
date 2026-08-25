@@ -1,19 +1,16 @@
 # Real N603 data
 
-Extracted from `Book2.xlsx` (two sheets: drive cycle, efficiency map) into the two
-files the tool loads directly.
+| file | source | what it is |
+|---|---|---|
+| `N603_real_drive_cycle.xlsx` | `Book3.xlsx` | **the drive cycle to use** — 1,801 samples, 1,800 s, **11.81 km**, max 44.71 km/h |
+| `N603_real_efficiency_map.xlsx` | `Book2.xlsx` Sheet2 | 42 torque rows × 901 rpm columns, peak **94.13 %** at 4260 rpm / 13.0 Nm |
 
-| file | what it is |
-|---|---|
-| `N603_real_drive_cycle.xlsx` | 28,368 samples, 28,367 s, 111.35 km, max 42.26 km/h |
-| `N603_real_efficiency_map.xlsx` | 42 torque rows x 901 rpm columns, peak **94.13 %** at 4260 rpm / 13.0 Nm, 14,091 blank cells |
-
-These match every diagnostic the original notebook printed, so the synthetic
-stand-in in `sample_data/` can now be retired for anything quantitative.
+`Book2.xlsx` Sheet1 held a longer 111 km log. That is **not** the cycle this study
+is about — the city cycle above is, and it is the one the reported screenshots were
+produced from. The longer log is kept only in `sample_data/` as a second dataset to
+check that nothing in the tool depends on one cycle's shape.
 
 **Load them straight into the app** — `Load drive cycle` accepts `.xlsx` as well as
 `.csv`; the map loader already did.
 
-Note the earlier screenshots in this project were produced with a different,
-much shorter city cycle (12 km, 0.5 h). Which cycle is loaded changes the shape of
-the efficiency-vs-downshift curve — see ENGINEERING_NOTES section 7s.
+`verify_model.py` runs against these by default and passes on both datasets.
