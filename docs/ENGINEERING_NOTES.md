@@ -1828,6 +1828,56 @@ measurement of it.
 **74/74 pass on Book3 and on the 111 km log.**
 
 
+## 7w. Shift movement on a short cycle: 18 arrows drawn on 1,764 points
+
+Reported: in Shift movement every gear-2 point looks as though it came from a shift, but
+they are not all drawn that way.
+
+### What is actually on the plot
+
+Book3 at 21/4: **18 gear changes over 1,801 samples.** Gear 1 carries 298 loaded samples,
+gear 2 carries 1,466. Only **36 of those 1,466 - 2.5 %** are within one sample of a change.
+
+Nothing was being hidden or thinned: the cloud cap is 6,000 points and both clouds are far
+under it, and every one of the 18 shifts already had its arrow. The problem is that **9
+arrows drawn over 1,466 markers cannot be seen**, so the eye reads the dense population as
+the thing the arrows describe. The plot was telling the truth and reading as its opposite.
+
+### Three changes
+
+**Cloud: only near a shift** (new, off by default) with a **neighbourhood** slider,
+2-60 s, default 10 s. The background cloud keeps only samples within that window of a gear
+change: 1,764 loaded samples become 333 - 19 %. The window is in **seconds, not samples**,
+so the control means the same thing on a 1 Hz log and on a finer one, and the legend
+changes to `gear 2 near a shift (184)` so the count on screen is never mistaken for the
+whole cycle.
+
+**Number the shifts** (new, on by default) - each arrow is numbered when there are 30 or
+fewer, so an arrow on the map can be found in the Single-strategy traces. Above 30 the
+labels are more ink than the arrows they annotate, so they stop.
+
+**The cloud fades when the arrows are few** - alpha 0.55 above 60 shifts, 0.35 above 20,
+0.22 below. Ink follows importance rather than population.
+
+The summary now opens with the arithmetic, because that is the whole answer:
+
+```
+  HOW MUCH OF THE CLOUD IS A SHIFT
+    18 gear changes over 1,801 samples (30 min)
+    gear 1 carries 298 loaded samples, gear 2 carries 1,466
+    within +-10 s of a change: 333 samples
+
+    A dense cloud with a few arrows on it reads as though every point
+    came from a shift. It does not: the arrows are the events, the cloud
+    is where the vehicle spent its time between them.
+```
+
+Verified by C20: the filter keeps 19 % of the loaded samples, **retains every one of the
+18 shifts** (a filter that dropped its own subject would be worse than none), and all four
+switch combinations report **identical** decomposition numbers - turning a layer off must
+never change a number. 75/75 pass.
+
+
 ## 8. Fix order (first four change the answer)
 
 1. **Enforce `downshift < upshift` in every sweep**, not just the combined grid. This alone deletes the headline result.

@@ -499,6 +499,14 @@ class ShiftOptimiserApp(ctk.CTk):
         self.disp["lay_arrow"] = self._check(left, "Shift arrows (gearbox)", True)
         self.disp["lay_driver"] = self._check(left, "Driver arrows (dotted)", True)
         self.disp["lay_marks"] = self._check(left, "Before / after markers", True)
+        # On a short cycle the arrows are the point and the cloud is the noise:
+        # 18 shifts against 1,466 gear-2 samples means the events are invisible
+        # inside the population they are drawn on top of. This restricts the cloud
+        # to the neighbourhood of a gear change, so what is left on screen is what
+        # the shift actually did.
+        self.disp["lay_near"] = self._check(left, "Cloud: only near a shift", False)
+        self.disp["lay_window"] = self._slider(left, "  neighbourhood", 2, 60, 10, " s")
+        self.disp["lay_number"] = self._check(left, "Number the shifts", True)
         self.disp["fill_levels"] = self._slider(left, "Shading levels", 2, 40, 22)
         self.disp["line_levels"] = self._slider(left, "Number of contour lines", 2, 25, 10)
         self.disp["cmap"] = self._menu(left, CMAPS, "viridis")
@@ -1671,6 +1679,17 @@ class ShiftOptimiserApp(ctk.CTk):
             tmin = 0.0                       # motoring half only, by request
         ax = self.fig.subplots(1, 2, sharex=True, sharey=True)
         act_all = np.abs(r.motor_torque) > 1e-9
+
+        # The neighbourhood mask, in SECONDS rather than samples, so the control
+        # means the same thing on a 1 Hz log and on a finer one.
+        near_on = self._disp("lay_near", False)
+        win_s = float(self._num_disp("lay_window", 10))
+        near = np.ones(len(r.gear), dtype=bool)
+        if near_on and len(sh):
+            t = self.cycle.time
+            near = np.zeros(len(r.gear), dtype=bool)
+            for i in sh:
+                near |= np.abs(t - t[i]) <= win_s
         for A, grp, col, lab in ((ax[0], ups, COLORS["success"], "Upshift  1 -> 2"),
                                  (ax[1], dns, COLORS["warning"], "Downshift  2 -> 1")):
             c = self._signed_background(A, p, tmin, tmax)
@@ -1683,15 +1702,21 @@ class ShiftOptimiserApp(ctk.CTk):
                     (2, self._disp("lay_g2", True), CLOUD_G2, "^")):
                 if not on:
                     continue
-                m = act_all & (r.gear == gear)
+                m = act_all & (r.gear == gear) & near
                 idx = np.flatnonzero(m)
                 if not len(idx):
                     continue
                 if len(idx) > 6000:
                     idx = idx[:: int(np.ceil(len(idx) / 6000))]
+                # Fade the cloud when the arrows are few: 9 arrows drawn at full
+                # strength over 1,466 markers still lose. Ink follows importance.
+                _al = .55 if len(sh) > 60 else (.35 if len(sh) > 20 else .22)
                 A.scatter(r.motor_rpm[idx], r.motor_torque[idx], s=9, marker=mk,
-                          facecolor=colr, edgecolor="none", alpha=.55, zorder=3,
-                          label=f"all gear {gear}  ({int(m.sum()):,})")
+                          facecolor=colr, edgecolor="none",
+                          alpha=(.55 if near_on else _al), zorder=3,
+                          label=(f"gear {gear} near a shift  ({int(m.sum()):,})"
+                                 if near_on else
+                                 f"all gear {gear}  ({int(m.sum()):,})"))
             # every shift, not a sample of thirty: thin the ink instead of the data
             take = grp
             dense = max(1, len(take))
@@ -1717,6 +1742,17 @@ class ShiftOptimiserApp(ctk.CTk):
                                            lw=min(1.0, a_lw), ls=":",
                                            alpha=min(.8, a_al), shrinkA=0, shrinkB=0),
                            zorder=6)
+            # With a handful of events, number them and give each its clock time,
+            # so an arrow on the map can be found in the Single-strategy traces.
+            # Above ~30 the labels are more ink than the arrows they annotate.
+            if self._disp("lay_number", True) and 0 < len(take) <= 30:
+                for k, i in enumerate(take):
+                    A.annotate(f"{k + 1}", (r.motor_rpm[i], r.motor_torque[i]),
+                               textcoords="offset points", xytext=(4, 5),
+                               fontsize=7.5, fontweight="bold", color=col,
+                               zorder=9,
+                               bbox=dict(boxstyle="circle,pad=.12", fc="white",
+                                         ec=col, lw=.7, alpha=.85))
             if len(grp):
                 # computed whether or not the markers are drawn - the panel title
                 # quotes it, and turning a layer off must not change the numbers
@@ -1746,10 +1782,30 @@ class ShiftOptimiserApp(ctk.CTk):
 
         d = sc.shift_decomposition(r, self.cycle, self.emap, veh=p["veh"],
                                    motor=p["motor"], gb=p["gb"], num=p["num"])
-        L = ["What a gear change actually does to the operating point", "=" * 74, "",
+        L = ["What a gear change actually does to the operating point", "=" * 74,
+             "  " + sc.build_stamp(), "",
              "  The solid arrow is the GEARBOX: same instant, ratio swapped.",
              "  The dotted arrow is the DRIVER: the demand moving on to the next sample.",
              "  Drawn as one arrow (the old view) those two are indistinguishable.", ""]
+        # How much of the cloud is actually a shift event. On a short cycle the
+        # answer is "almost none", and the plot reads the opposite way because the
+        # cloud is dense and the arrows are few.
+        _n2 = int((act_all & (r.gear == 2)).sum())
+        _n1 = int((act_all & (r.gear == 1)).sum())
+        _shown = int((act_all & near).sum()) if near_on else _n1 + _n2
+        L += [f"  HOW MUCH OF THE CLOUD IS A SHIFT",
+              f"    {len(sh)} gear changes over {len(r.gear):,} samples "
+              f"({self.cycle.duration/60:.0f} min)",
+              f"    gear 1 carries {_n1:,} loaded samples, gear 2 carries {_n2:,}",
+              f"    within +-{win_s:.0f} s of a change: {int((act_all & near).sum()):,} "
+              f"samples" if near_on else
+              f"    every loaded sample is drawn - tick 'Cloud: only near a shift' to",
+              ("" if near_on else
+               "    keep only the neighbourhood of a change and see what it did"),
+              "", "    A dense cloud with a few arrows on it reads as though every point",
+              "    came from a shift. It does not: the arrows are the events, the cloud",
+              "    is where the vehicle spent its time between them.", ""]
+        L = [x for x in L if x != ""] if False else L
         for name in ("upshift", "downshift"):
             x = d.get(name)
             if not x:

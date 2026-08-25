@@ -1049,6 +1049,65 @@ try:
 except Exception as exc:
     check("C19 all 8 switch combinations draw and summarise", False, repr(exc))
 
+section("C20 Shift movement separates the events from the population",
+        "on a short cycle a handful of gear changes are drawn on top of a dense "
+        "cloud, so every point reads as though it came from a shift. The "
+        "neighbourhood filter must keep only samples close to a change, must never "
+        "drop a shift, and must leave the reported numbers alone.")
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as _p2
+    import shift_app as APP3
+
+    class _S3:
+        disp = {}
+        def __init__(self, sw):
+            self.cycle, self.emap, self._sw = cy, em, sw
+            self.fig = _p2.figure(figsize=(11, 6))
+    for _n, _fn in vars(APP3.ShiftOptimiserApp).items():
+        if _n.startswith("_") and callable(_fn) and not _n.startswith("__"):
+            setattr(_S3, _n, _fn)
+    _S3._disp = lambda self, k, d=True: self._sw.get(k, d)
+    _S3._num_disp = lambda self, k, d: float(self._sw.get(k, d))
+    _S3._f = lambda self, k, a, d: float(d)
+    _S3.log = lambda self, t: setattr(self, "last", t)
+    _S3.say = lambda self, *a, **k: None
+
+    _r20 = M.simulate(cy, em, 21, 4, keep_arrays=True, **{**P, "cost": cst})
+    _sh20 = np.flatnonzero(np.diff(_r20.gear) != 0)
+    _act = np.abs(_r20.motor_torque) > 1e-9
+    _t = cy.time
+    _near = np.zeros(len(_r20.gear), bool)
+    for _i in _sh20:
+        _near |= np.abs(_t - _t[_i]) <= 10.0
+    _kept, _all = int((_act & _near).sum()), int(_act.sum())
+    # every shift must survive the filter, or the view would hide its own subject
+    _shift_kept = all(_near[_i] and _near[_i + 1] for _i in _sh20)
+
+    _texts, _bad20 = [], []
+    for _nr in (True, False):
+        for _nm in (True, False):
+            st3 = _S3({"lay_near": _nr, "lay_window": 10, "lay_number": _nm})
+            try:
+                st3._draw_shift(_r20, {**P, "cost": cst}, "Shift movement")
+                _texts.append(st3.last)
+            except Exception as _e:
+                _bad20.append(f"near={_nr} number={_nm}: {_e!r}")
+            _p2.close(st3.fig)
+    # the decomposition numbers must not depend on what is drawn
+    _same = len({t[t.index("  UPSHIFT"):] for t in _texts}) == 1 if _texts else False
+    check("C20 the neighbourhood filter thins the cloud, keeps every shift, and "
+          "changes no number",
+          not _bad20 and _shift_kept and _kept < _all and _same,
+          f"{_all:,} loaded samples -> {_kept:,} within +-10 s of a change "
+          f"({100*_kept/_all:.0f} %); all {len(_sh20)} shifts retained; "
+          f"4 switch combinations drew and reported identical decompositions"
+          + ("" if not _bad20 else "; FAILED: " + "; ".join(_bad20)))
+except Exception as exc:
+    check("C20 the neighbourhood filter thins the cloud, keeps every shift, and "
+          "changes no number", False, repr(exc))
+
 # ======================================================================= END
 print("\n" + "=" * 78)
 n_fail = sum(1 for *_, ok, _ in [(s, n, o, d) for s, n, o, d in RESULTS] if not ok)
