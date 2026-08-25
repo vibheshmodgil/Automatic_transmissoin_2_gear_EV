@@ -29,7 +29,7 @@ Windows users can double-click `Run Shift Optimiser.bat`.
 |---|---|
 | `shift_core.py` | Physics engine. Pure functions and dataclasses — no UI, no globals. |
 | `shift_app.py` | CustomTkinter front end. Presentation only; every number comes from the core. |
-| `verify_model.py` | Independent verification suite. 70 checks against closed forms and analytic identities. |
+| `verify_model.py` | Independent verification suite. 73 checks against closed forms and analytic identities. |
 | `make_shift_report.py` | Builds a self-contained HTML report with all figures embedded. |
 | `sample_data/` | Synthetic cycle and map, plus the format specification. |
 | `docs/ENGINEERING_NOTES.md` | Full working notes: every defect found, why each decision was made. |
@@ -255,7 +255,7 @@ the shift schedule cannot matter however it is chosen.
 
 ## Verification
 
-`verify_model.py` runs 70 checks. Each states a prediction derived independently — a
+`verify_model.py` runs 73 checks. Each states a prediction derived independently — a
 closed form, an analytic identity, or a bound physics requires — and compares. Nothing
 calls the code under test to produce its own expected value.
 

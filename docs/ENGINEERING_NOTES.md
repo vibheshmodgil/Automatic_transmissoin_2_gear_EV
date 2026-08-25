@@ -1659,6 +1659,45 @@ None of those change a number - they only change what is drawn.
 **So: auxiliary load is Electrical > Auxiliary load [W], default 150.** It is the second
 largest term in the whole budget and the one nobody has questioned yet.
 
+### Percentage shares, and three settings that were not settable
+
+Two additions so the proportions are on screen rather than in a note, and so the inputs
+that move them can actually be moved.
+
+**Shares everywhere.** Single strategy now prints an **ENERGY BUDGET** block - each term in
+kWh, as a **share of consumed**, in **Wh/km**, and the field that sets it - then says what
+the shares mean:
+
+```
+  ENERGY BUDGET - every Wh, and what sets it
+    term                        kWh   share    Wh/km   set by
+    road work                7.7166   79.3%     69.3   Vehicle: mass, CdA, Crr, grade
+    gearbox loss             0.2387    2.5%      2.1   Gearbox: efficiency gear 1 / 2
+    MOTOR loss               0.6956    7.1%      6.2   the map + where the schedule puts it
+    auxiliary load           1.1820   12.1%     10.6   Electrical: Auxiliary load [W]
+    shift actuator + cut     0.0176    0.2%      0.2   Shift cost: V x A x s, + the cut
+    = consumed               9.7367  100.0%     87.4
+    recovered (regen)       -0.4305   -4.4%     -3.9   Regen section
+    = NET (the objective)    9.3062   95.6%     83.6
+```
+
+Loss breakdown gained a share column on both the shift and motor terms in its table, a
+**SHARE OF CONSUMED** block at the optimum, and the share printed **in the stack legend**
+so the proportion is readable off the plot without measuring it.
+
+**Three settings promoted to inputs:**
+
+| new field | why it matters |
+|---|---|
+| **Shift cost > Traction cut [s]** (`-1` = same as shift duration) | 7t showed this is the single most influential *uncertain* input - it walks the downshift optimum 7 km/h while the efficiency peak does not move. It was previously reachable only by changing the shift duration, which also changes the actuation energy, so the two could not be separated. Now they can, including `0` for no cut at all. |
+| **Numerics > Power epsilon [W]** | decides which samples count as active at all |
+| **Numerics > Min map efficiency** | screens map cells; 7e defect 3 turned on this number |
+
+Verified by C18 (3 checks): auxiliary load moves consumed by exactly `W x time`
+(150 -> 300 W adds 1182.0 Wh against a predicted 1182.0), the traction cut is settable
+independently of the actuator (0 s -> 0.0 Wh of cut with actuation unchanged at 3.87 Wh),
+and the printed shares sum to 100.000000 %. 73/73 pass.
+
 
 ## 8. Fix order (first four change the answer)
 

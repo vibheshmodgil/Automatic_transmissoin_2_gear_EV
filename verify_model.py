@@ -844,6 +844,43 @@ check("C17c and the whole span is small enough to change no conclusion",
       f"{cy.distance_km:.0f} km - under {100*span/1000/sens['net_kwh'].min():.2f} % "
       f"of the cycle")
 
+section("C18 The exposed settings actually reach the physics",
+        "a control that does not change the number it claims to is worse than no "
+        "control. Auxiliary load, the traction cut and the numerics screens are now "
+        "settable, so each must move the result it is supposed to and nothing else.")
+
+Pb2 = dict(veh=veh, motor=mot, gb=gb, num=num)
+c0 = M.ShiftCost(max_shifts_per_hour=1e9, min_band_kmh=3)
+r150 = M.simulate(cy, em, 18, 4, elec=M.Electrical(aux_load=150.0), cost=c0, **Pb2)
+r300 = M.simulate(cy, em, 18, 4, elec=M.Electrical(aux_load=300.0), cost=c0, **Pb2)
+d_aux = 1000 * (r300.consumed_kwh - r150.consumed_kwh)
+want = 150.0 * cy.duration / 3.6e3
+check("C18 auxiliary load moves consumed by exactly W x time",
+      abs(d_aux - want) < 0.5,
+      f"150 -> 300 W adds {d_aux:.1f} Wh; 150 W x {cy.duration/3600:.2f} h = "
+      f"{want:.1f} Wh")
+
+cut0 = M.ShiftCost(max_shifts_per_hour=1e9, min_band_kmh=3, interrupt_s=0.0)
+cut5 = M.ShiftCost(max_shifts_per_hour=1e9, min_band_kmh=3, interrupt_s=0.5)
+a = M.simulate(cy, em, 18, 4, cost=cut0, **P)
+b = M.simulate(cy, em, 18, 4, cost=cut5, **P)
+check("C18b the traction cut is settable independently of the actuator",
+      abs(a.interrupt_energy_kwh) < 1e-15 and b.interrupt_energy_kwh > 0
+      and abs(a.shift_energy_kwh - b.shift_energy_kwh) < 1e-15,
+      f"cut 0 s -> {1000*a.interrupt_energy_kwh:.1f} Wh, cut 0.5 s -> "
+      f"{1000*b.interrupt_energy_kwh:.1f} Wh, actuation unchanged at "
+      f"{1000*a.shift_energy_kwh:.2f} Wh")
+
+# the shares that are now printed must be shares of something real
+rb = M.simulate(cy, em, 18, 4, keep_arrays=True, cost=c0, **P)
+bb = M.energy_breakdown(rb, cy, veh=veh, motor=mot, gb=gb, elec=el, num=num)
+shares = [bb[k] / bb["battery"] for k in ("wheel", "gearbox", "motor", "aux", "shift")]
+check("C18c the printed percentage shares sum to 100 %",
+      abs(sum(shares) - 1.0) < 1e-12 and all(x >= 0 for x in shares),
+      "  ".join(f"{k} {100*v:.2f}%" for k, v in
+               zip(("road", "gearbox", "motor", "aux", "shift"), shares))
+      + f"  = {100*sum(shares):.6f}%")
+
 # ======================================================================= END
 print("\n" + "=" * 78)
 n_fail = sum(1 for *_, ok, _ in [(s, n, o, d) for s, n, o, d in RESULTS] if not ok)

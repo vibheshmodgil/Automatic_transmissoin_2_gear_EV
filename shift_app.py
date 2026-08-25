@@ -114,6 +114,11 @@ FIELDS = [
     ("Shift cost", "Actuator voltage [V]", "actuator_voltage", "12", "cost"),
     ("Shift cost", "Actuator current [A]", "actuator_current", "20", "cost"),
     ("Shift cost", "Shift duration [s]", "actuator_time_s", "0.5", "cost"),
+    # The traction cut is the single most influential UNCERTAIN input in the study
+    # (see 7t: it moves the downshift optimum 7 km/h while the efficiency peak does
+    # not move at all). It was only reachable by changing the shift duration, which
+    # also changes the actuation energy, so the two could not be separated.
+    ("Shift cost", "Traction cut [s] (-1 = shift duration)", "interrupt_s", "-1", "cost"),
     ("Shift cost", "Max shifts per hour", "max_shifts_per_hour", "120", "cost"),
     ("Shift cost", "Min hysteresis band [km/h]", "min_band_kmh", "3", "cost"),
     ("Shift cost", "Min accel reserve [m/s2]", "min_accel_reserve", "0.5", "cost"),
@@ -134,6 +139,8 @@ FIELDS = [
     ("Acceleration run", "Target speed [km/h]", "v_target", "30", "run"),
     ("Acceleration run", "Throttle [0-1]", "throttle", "1.0", "run"),
     ("Numerics", "Smoothing window (0=off)", "smooth_window", "0", "num"),
+    ("Numerics", "Power epsilon [W]", "power_epsilon", "1.0", "num"),
+    ("Numerics", "Min map efficiency", "min_efficiency", "0.01", "num"),
 
 ]
 
@@ -656,7 +663,15 @@ class ShiftOptimiserApp(ctk.CTk):
             actuator_voltage=self._f("cost", "actuator_voltage", 12.0),
             actuator_current=self._f("cost", "actuator_current", 20.0),
             actuator_time_s=self._f("cost", "actuator_time_s", 0.5))
-        num = sc.Numerics(smooth_window=int(self._f("num", "smooth_window", 0)))
+        # negative means "derive from the actuator", which is what ShiftCost does
+        # for interrupt_s=None; anything >= 0 is taken literally, including 0 for
+        # "no traction cut at all"
+        _cut = self._f("cost", "interrupt_s", -1.0)
+        if _cut >= 0:
+            cost.interrupt_s = _cut
+        num = sc.Numerics(smooth_window=int(self._f("num", "smooth_window", 0)),
+                          power_epsilon=self._f("num", "power_epsilon", 1.0),
+                          min_efficiency=self._f("num", "min_efficiency", 0.01))
         return dict(veh=veh, motor=mot, gb=gb, elec=el, cost=cost, num=num)
 
     # ------------------------------------------------------------------ data
@@ -2035,14 +2050,21 @@ class ShiftOptimiserApp(ctk.CTk):
             a1 = self.fig.add_subplot(gs[0, c])
             loss_terms = [t for t in self.TERMS if t[0] != "wheel"]
             ys = [1000 * df[k].to_numpy() for k, _, _ in loss_terms]
-            a1.stackplot(x, *ys, labels=[lb for _, lb, _ in loss_terms],
+            # Label each band with its SHARE OF CONSUMED at the energy optimum, so
+            # the reader sees the proportion without having to measure the plot -
+            # which is the whole point of stacking them.
+            tot_b = float(df["total"].iloc[i_best])
+            labs = [f"{lb}  {100*df[k].iloc[i_best]/tot_b:.1f}%"
+                    for k, lb, _ in loss_terms]
+            a1.stackplot(x, *ys, labels=labs,
                          colors=[cc for _, _, cc in loss_terms], alpha=.92)
             a1.set_ylabel("loss [Wh]")
             a1.set_title(col + " sweep - share of the LOSSES" + chr(10)
                          + "(" + other + " held at " + format(held, "g")
                          + " km/h; road work "
-                         + format(1000 * df["wheel"].mean(), ".0f")
-                         + " Wh excluded)", fontsize=9.5)
+                         + format(1000 * df["wheel"].mean(), ".0f") + " Wh = "
+                         + format(100 * df["wheel"].iloc[i_best] / tot_b, ".0f")
+                         + "% excluded)", fontsize=9.5)
             if c == 0:
                 a1.legend(fontsize=7, loc="upper left", ncol=2, framealpha=.9)
 
@@ -2114,16 +2136,19 @@ class ShiftOptimiserApp(ctk.CTk):
             i_e = int(np.argmax(df["mean_efficiency"].to_numpy()))
             xb = df["threshold"].iloc[i_b]
             xe = df["threshold"].iloc[i_e]
-            L += ["  " + col.upper() + " SWEEP", "  " + "-" * 66,
-                  f"    {'thr':>5}{'changes':>9}{'shift Wh':>10}{'motor Wh':>10}"
-                  f"{'mean eff':>10}{'net Wh':>10}"]
+            L += ["  " + col.upper() + " SWEEP", "  " + "-" * 76,
+                  f"    {'thr':>5}{'changes':>9}{'shift Wh':>10}{'(%)':>7}"
+                  f"{'motor Wh':>10}{'(%)':>7}{'mean eff':>10}{'net Wh':>10}"]
             for k in range(len(df)):
                 mark = ("  <- least energy" if k == i_b else
                         ("  <- best efficiency" if k == i_e else ""))
+                tt = 1000 * float(df["total"].iloc[k])
                 L.append(f"    {df['threshold'].iloc[k]:5.0f}"
                          f"{int(df['shifts'].iloc[k]):9d}"
                          f"{df['shift_wh'].iloc[k]:10.1f}"
+                         f"{100*df['shift_wh'].iloc[k]/tt:6.2f}%"
                          f"{df['motor_wh'].iloc[k]:10.1f}"
+                         f"{100*df['motor_wh'].iloc[k]/tt:6.2f}%"
                          f"{100*df['mean_efficiency'].iloc[k]:9.3f}%"
                          f"{1000*df['net_kwh'].iloc[k]:10.1f}{mark}")
             if i_b == i_e:
@@ -2165,7 +2190,20 @@ class ShiftOptimiserApp(ctk.CTk):
                           "    is entirely in the motor term - read this one as a genuine",
                           "    efficiency-map result."]
                 L.append("")
-        L += ["  Reading the panels:",
+        for col in ("upshift", "downshift"):
+            df = out["terms"][col]
+            if df is None or df.empty:
+                continue
+            k = int(np.argmin(df["net_kwh"].to_numpy()))
+            tt = float(df["total"].iloc[k])
+            L += ["", f"  SHARE OF CONSUMED at the {col} optimum "
+                      f"({df['threshold'].iloc[k]:g} km/h)", "  " + "-" * 66]
+            for key, lab, _ in self.TERMS:
+                L.append(f"    {lab:<24}{df[key].iloc[k]:9.4f} kWh"
+                         f"{100*df[key].iloc[k]/tt:8.1f} %")
+            L.append(f"    {'= consumed':<24}{tt:9.4f} kWh{100.0:8.1f} %")
+            break
+        L += ["", "  Reading the panels:",
               "    row 1  every Wh in the cycle, stacked. The green band is the shift",
               "           cost - watch it grow as the threshold moves.",
               "    row 2  the trade on one axis: shift cost against motor loss above",
@@ -2766,6 +2804,64 @@ class ShiftOptimiserApp(ctk.CTk):
             pass
         return NL.join(L)
 
+    def _budget_lines(self, r, p):
+        """Every Wh in the cycle, as kWh AND as a share of consumed.
+
+        The absolute numbers alone hide the proportions, and the proportions are
+        the finding: on the real cycle the 150 W auxiliary load costs 1.7x the
+        ENTIRE motor loss, and the shift cost is 0.18 %. Without the share column
+        a reader tunes the shift schedule - the smallest term on the list - and
+        never looks at the hotel load.
+        """
+        if getattr(r, "gear", None) is None:
+            return []
+        try:
+            b = sc.energy_breakdown(r, self.cycle, veh=p["veh"], motor=p["motor"],
+                                    gb=p["gb"], elec=p["elec"], num=p["num"])
+        except Exception:
+            return []
+        tot = b["battery"]
+        if not np.isfinite(tot) or tot <= 0:
+            return []
+        rows = [("road work", "wheel", "Vehicle: mass, CdA, Crr, grade"),
+                ("gearbox loss", "gearbox", "Gearbox: efficiency gear 1 / 2"),
+                ("MOTOR loss", "motor", "the map + where the schedule puts it"),
+                ("auxiliary load", "aux", "Electrical: Auxiliary load [W]"),
+                ("shift actuator + cut", "shift", "Shift cost: V x A x s, + the cut")]
+        L = ["", "  ENERGY BUDGET - every Wh, and what sets it", "  " + "-" * 68,
+             f"    {'term':<22}{'kWh':>9}{'share':>8}{'Wh/km':>9}   set by"]
+        for label, key, who in rows:
+            L.append(f"    {label:<22}{b[key]:9.4f}{100*b[key]/tot:7.1f}%"
+                     f"{1000*b[key]/r.distance_km:9.1f}   {who}")
+        L += [f"    {'':<22}{'-'*9:>9}{'-'*8:>8}",
+              f"    {'= consumed':<22}{tot:9.4f}{100.0:7.1f}%"
+              f"{1000*tot/r.distance_km:9.1f}"]
+        if r.recovered_kwh > 0:
+            L.append(f"    {'recovered (regen)':<22}{-r.recovered_kwh:9.4f}"
+                     f"{-100*r.recovered_kwh/tot:7.1f}%"
+                     f"{-1000*r.recovered_kwh/r.distance_km:9.1f}   Regen section")
+        L.append(f"    {'= NET (the objective)':<22}{r.net_kwh:9.4f}"
+                 f"{100*r.net_kwh/tot:7.1f}%{r.wh_per_km:9.1f}")
+
+        big = max(("gearbox", "motor", "aux", "shift"), key=lambda k: b[k])
+        names = {"gearbox": "the gearbox", "motor": "the motor",
+                 "aux": "the auxiliary load", "shift": "gear changes"}
+        L += ["",
+              f"    Road work is {100*b['wheel']/tot:.0f} % and is set by the vehicle, not",
+              "    by the transmission - no shift schedule touches it.",
+              f"    Of what IS left, the largest single item is {names[big]} at "
+              f"{100*b[big]/tot:.1f} %."]
+        if b["aux"] > b["motor"]:
+            L += [f"    Note the auxiliary load ({b['aux']:.3f} kWh) exceeds the ENTIRE",
+                  f"    motor loss ({b['motor']:.3f} kWh) by {b['aux']/b['motor']:.2f}x. "
+                  f"{p['elec'].aux_load:.0f} W for "
+                  f"{self.cycle.duration/3600:.2f} h costs",
+                  "    more than every inefficiency at every operating point together."]
+        if b["shift"] < 0.01 * tot:
+            L.append(f"    The shift cost is {100*b['shift']/tot:.2f} % - it decides the "
+                     f"threshold, not the total.")
+        return L
+
     # -------------------------------------------------------------- summaries
     def _summary(self, r):
         L = [f"Strategy: upshift {r.upshift:g} / downshift {r.downshift:g} km/h",
@@ -2794,6 +2890,7 @@ class ShiftOptimiserApp(ctk.CTk):
              f"same speed",
              f"  acceleration given up {100*r.accel_loss:8.0f} %  by handing over there",
              ""]
+        L += self._budget_lines(r, self.params())
         L += self._gear_table(r)
         L += ["",
              f"  envelope violations {r.envelope_violations:10,}",
